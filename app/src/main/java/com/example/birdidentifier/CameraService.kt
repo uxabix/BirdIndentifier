@@ -28,6 +28,8 @@ class CameraService : Service(), LifecycleOwner {
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private lateinit var mjpegServer: MjpegServer
     private var previousYPlane: ByteArray? = null // Store the Y plane of the previous frame
+    private var framesRemainingAfterMotion = 0
+    private val MOTION_POST_DELAY_FRAMES = 300
 
     override val lifecycle: Lifecycle
         get() = lifecycleRegistry
@@ -57,7 +59,7 @@ class CameraService : Service(), LifecycleOwner {
 
     // Compares the luminance (Y) planes of two images to detect motion.
     // Comparing raw luminance is more reliable than comparing compressed JPEGs.
-    fun hasMotion(prevYPlane: ByteArray?, currYPlane: ByteArray, threshold: Int = 5): Boolean {
+    fun hasMotion(prevYPlane: ByteArray?, currYPlane: ByteArray, threshold: Int = 10): Boolean {
         if (prevYPlane == null || prevYPlane.size != currYPlane.size) {
             // If there's no previous frame or dimensions changed, assume motion.
             return true
@@ -69,7 +71,7 @@ class CameraService : Service(), LifecycleOwner {
             diff += kotlin.math.abs(currYPlane[i].toInt() - prevYPlane[i].toInt())
         }
         val avgDifference = diff / currYPlane.size
-        Log.d("CameraService", "Average pixel difference: $avgDifference")
+        // Log.d("CameraService", "Average pixel difference: $avgDifference")
         return avgDifference > threshold
     }
 
@@ -89,12 +91,27 @@ class CameraService : Service(), LifecycleOwner {
                 val currentYPlane = ByteArray(ySize)
                 yBuffer.get(currentYPlane)
 
-                // Perform motion detection on the Y plane
-                if (hasMotion(previousYPlane, currentYPlane)) {
-                    Log.d("CameraService", "Motion detected, updating frame.")
-                    // If motion is detected, convert the full image to JPEG and update the buffer
+                val motionDetected = hasMotion(previousYPlane, currentYPlane)
+
+                if (motionDetected) {
+                    if (framesRemainingAfterMotion == 0) {
+                        Log.d("CameraService", "Motion detected: Starting frame transmission.")
+                    }
+                    framesRemainingAfterMotion = MOTION_POST_DELAY_FRAMES
+                    
+                    // Update frame
                     val jpeg = imageToJpeg(image)
                     FrameBuffer.latestFrame.set(jpeg)
+                } else if (framesRemainingAfterMotion > 0) {
+                    framesRemainingAfterMotion--
+                    
+                    // Update frame during post-motion delay
+                    val jpeg = imageToJpeg(image)
+                    FrameBuffer.latestFrame.set(jpeg)
+                    
+                    if (framesRemainingAfterMotion == 0) {
+                        Log.d("CameraService", "No motion for $MOTION_POST_DELAY_FRAMES frames: Stopping frame transmission.")
+                    }
                 }
 
                 // Store the current Y plane for the next frame's comparison
