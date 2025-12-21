@@ -3,12 +3,13 @@ package com.example.birdidentifier
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -18,18 +19,31 @@ import androidx.core.content.ContextCompat
 @Composable
 fun CameraControlUI() {
     val context = LocalContext.current
-    val launcher = rememberLauncherForActivityResult(
+    val sharedPrefs = context.getSharedPreferences("BirdPrefs", android.content.Context.MODE_PRIVATE)
+    var selectedFolderUri by remember { 
+        mutableStateOf(sharedPrefs.getString("save_folder_uri", null)) 
+    }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted: Boolean ->
         if (isGranted) {
-            // Permission Accepted: Start the service
-            ContextCompat.startForegroundService(
-                context,
-                Intent(context, CameraService::class.java)
-            )
-        } else {
-            // Permission Denied
-            // You can show a message to the user here
+            ContextCompat.startForegroundService(context, Intent(context, CameraService::class.java))
+        }
+    }
+
+    val folderLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        uri?.let {
+            // Persist access permissions
+            val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            context.contentResolver.takePersistableUriPermission(it, takeFlags)
+            
+            val uriString = it.toString()
+            sharedPrefs.edit().putString("save_folder_uri", uriString).apply()
+            selectedFolderUri = uriString
         }
     }
 
@@ -38,24 +52,22 @@ fun CameraControlUI() {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        Text("Save Folder: ${selectedFolderUri ?: "Default (App Movies)"}")
+        Spacer(modifier = Modifier.height(8.dp))
+        
+        Button(onClick = { folderLauncher.launch(null) }) {
+            Text("Select Save Folder (SD Card support)")
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
 
         Button(
             onClick = {
                 when (PackageManager.PERMISSION_GRANTED) {
-                    ContextCompat.checkSelfPermission(
-                        context,
-                        Manifest.permission.CAMERA
-                    ) -> {
-                        // Permission is already granted, start the service
-                        ContextCompat.startForegroundService(
-                            context,
-                            Intent(context, CameraService::class.java)
-                        )
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) -> {
+                        ContextCompat.startForegroundService(context, Intent(context, CameraService::class.java))
                     }
-                    else -> {
-                        // Permission is not granted, request it
-                        launcher.launch(Manifest.permission.CAMERA)
-                    }
+                    else -> cameraLauncher.launch(Manifest.permission.CAMERA)
                 }
             }
         ) {
@@ -66,9 +78,7 @@ fun CameraControlUI() {
 
         Button(
             onClick = {
-                context.stopService(
-                    Intent(context, CameraService::class.java)
-                )
+                context.stopService(Intent(context, CameraService::class.java))
             }
         ) {
             Text("Stop Camera Stream")
