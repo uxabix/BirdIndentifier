@@ -27,9 +27,10 @@ class CameraService : Service(), LifecycleOwner {
     private val lifecycleRegistry = LifecycleRegistry(this)
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private lateinit var deviceServer: DeviceServer
+    private lateinit var videoWriter: VideoWriter
     private var previousYPlane: ByteArray? = null
     private var framesRemainingAfterMotion = 0
-    private val MOTION_POST_DELAY_FRAMES = 300
+    private val MOTION_POST_DELAY_FRAMES = 600
 
     override val lifecycle: Lifecycle
         get() = lifecycleRegistry
@@ -37,6 +38,7 @@ class CameraService : Service(), LifecycleOwner {
     override fun onCreate() {
         super.onCreate()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
+        videoWriter = VideoWriter(this)
         startForegroundNotification()
         startMjpegServer()
         startCamera()
@@ -58,16 +60,14 @@ class CameraService : Service(), LifecycleOwner {
     override fun onBind(intent: Intent?): IBinder? = null
 
     fun hasMotion(prevYPlane: ByteArray?, currYPlane: ByteArray, threshold: Int = 10): Boolean {
-        if (prevYPlane == null || prevYPlane.size != currYPlane.size) {
-            return true
-        }
+        if (prevYPlane == null || prevYPlane.size != currYPlane.size) return true
         if (currYPlane.isEmpty()) return false
 
         var diff = 0L
-        for (i in currYPlane.indices) {
+        for (i in currYPlane.indices step 4) {
             diff += kotlin.math.abs(currYPlane[i].toInt() - prevYPlane[i].toInt())
         }
-        val avgDifference = diff / currYPlane.size
+        val avgDifference = diff / (currYPlane.size / 4)
         return avgDifference > threshold
     }
 
@@ -82,26 +82,31 @@ class CameraService : Service(), LifecycleOwner {
 
             imageAnalysis.setAnalyzer(cameraExecutor) { image ->
                 val yBuffer = image.planes[0].buffer
-                val ySize = yBuffer.remaining()
-                val currentYPlane = ByteArray(ySize)
+                val currentYPlane = ByteArray(yBuffer.remaining())
                 yBuffer.get(currentYPlane)
 
                 val motionDetected = hasMotion(previousYPlane, currentYPlane)
+                val jpeg = imageToJpeg(image)
+                val timestamp = System.currentTimeMillis()
+                FrameBuffer.latestFrame.set(jpeg)
 
                 if (motionDetected) {
-                    FrameBuffer.lastMotionTime.set(System.currentTimeMillis())
-                    
                     if (framesRemainingAfterMotion == 0) {
-                        Log.d("CameraService", "Motion detected!")
+                        Log.d("CameraService", "Motion detected! Starting recording.")
                     }
                     framesRemainingAfterMotion = MOTION_POST_DELAY_FRAMES
-                    
-                    val jpeg = imageToJpeg(image)
-                    FrameBuffer.latestFrame.set(jpeg)
+                    FrameBuffer.recordingBuffer.add(jpeg to timestamp)
+                    FrameBuffer.lastMotionTime.set(timestamp)
                 } else if (framesRemainingAfterMotion > 0) {
                     framesRemainingAfterMotion--
-                    val jpeg = imageToJpeg(image)
-                    FrameBuffer.latestFrame.set(jpeg)
+                    FrameBuffer.recordingBuffer.add(jpeg to timestamp)
+                    
+                    if (framesRemainingAfterMotion == 0) {
+                        Log.d("CameraService", "Motion stopped. Saving fragment.")
+                        val framesToSave = FrameBuffer.recordingBuffer.toList()
+                        FrameBuffer.recordingBuffer.clear()
+                        videoWriter.saveVideoWithTimestamps(framesToSave)
+                    }
                 }
 
                 previousYPlane = currentYPlane
@@ -119,9 +124,7 @@ class CameraService : Service(), LifecycleOwner {
         val yBuffer = image.planes[0].buffer
         val uBuffer = image.planes[1].buffer
         val vBuffer = image.planes[2].buffer
-        yBuffer.rewind()
-        uBuffer.rewind()
-        vBuffer.rewind()
+        yBuffer.rewind(); uBuffer.rewind(); vBuffer.rewind()
         val ySize = yBuffer.remaining()
         val uSize = uBuffer.remaining()
         val vSize = vBuffer.remaining()
@@ -142,8 +145,8 @@ class CameraService : Service(), LifecycleOwner {
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
         val notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("MJPEG Camera")
-            .setContentText("Streaming active")
+            .setContentTitle("Bird Identifier")
+            .setContentText("Monitoring for birds...")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .build()
         startForeground(1, notification)

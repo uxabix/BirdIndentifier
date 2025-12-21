@@ -1,8 +1,11 @@
 package com.example.birdidentifier
 
 import android.content.Context
+import android.os.Environment
 import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.FileInputStream
 import java.io.InputStream
 import java.util.concurrent.atomic.AtomicReference
 
@@ -35,6 +38,18 @@ class DeviceServer(
                 newFixedLengthResponse(Response.Status.OK, "text/plain", time.toString())
             }
 
+            "/videos" -> {
+                listVideos()
+            }
+
+            "/video" -> {
+                serveVideo(session.parameters["name"]?.firstOrNull())
+            }
+
+            "/delete-video" -> {
+                deleteVideo(session.parameters["name"]?.firstOrNull())
+            }
+
             "/" -> createHtmlResponse("Camera control")
 
             else -> newFixedLengthResponse(
@@ -42,6 +57,92 @@ class DeviceServer(
                 "text/plain",
                 "Not found"
             )
+        }
+    }
+
+    private fun deleteVideo(fileName: String?): Response {
+        if (fileName == null) return newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Missing name")
+        val moviesDir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+        val file = File(moviesDir, fileName)
+        
+        return if (file.exists() && file.delete()) {
+            newFixedLengthResponse(Response.Status.REDIRECT, "text/plain", "").apply {
+                addHeader("Location", "/videos")
+            }
+        } else {
+            newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "Could not delete file")
+        }
+    }
+
+    private fun listVideos(): Response {
+        val moviesDir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+        val files = moviesDir?.listFiles { file -> file.extension.lowercase() == "mp4" }
+            ?.sortedByDescending { it.name } ?: emptyList()
+        
+        val listHtml = files.joinToString("") { file ->
+            """
+            <li>
+                <div class="video-info">
+                    <a href='/video?name=${file.name}'>${file.name}</a> 
+                    <span class="file-size">(${file.length() / 1024} KB)</span>
+                </div>
+                <button class="delete-btn" onclick="if(confirm('Delete ${file.name}?')) location.href='/delete-video?name=${file.name}'" title="Delete Video">DEL 🗑️</button>
+            </li>
+            """.trimIndent()
+        }
+
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Recorded Videos</title>
+                <style>
+                    body { font-family: sans-serif; padding: 20px; background: #f0f0f0; margin: 0; }
+                    .container { max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+                    h2 { color: #333; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+                    ul { list-style: none; padding: 0; }
+                    li { padding: 15px; border-bottom: 1px solid #f0f0f0; display: flex; justify-content: space-between; align-items: center; }
+                    li:last-child { border-bottom: none; }
+                    .video-info { display: flex; flex-direction: column; padding-right: 10px; }
+                    .file-size { color:#888; font-size: 0.85em; margin-top: 4px; }
+                    a { text-decoration: none; color: #2196F3; font-weight: bold; word-break: break-all; }
+                    a:hover { text-decoration: underline; }
+                    .delete-btn { 
+                        background: #fff5f5; border: 1px solid #ffcdd2; color: #d32f2f; 
+                        padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 0.9em;
+                        font-weight: bold; flex-shrink: 0;
+                        transition: all 0.2s;
+                    }
+                    .delete-btn:hover { background: #ffebee; border-color: #f44336; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                    .back-link { display: inline-block; margin-bottom: 20px; color: #666; font-weight: bold; text-decoration: none; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <a href="/" class="back-link">← Back to Stream</a>
+                    <h2>Recorded Bird Fragments</h2>
+                    <ul>$listHtml</ul>
+                    ${if (files.isEmpty()) "<p style='text-align:center; color:#999;'>No videos recorded yet.</p>" else ""}
+                </div>
+            </body>
+            </html>
+        """.trimIndent()
+        return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", html)
+    }
+
+    private fun serveVideo(fileName: String?): Response {
+        if (fileName == null) return newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Missing name")
+        val moviesDir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+        val file = File(moviesDir, fileName)
+        if (!file.exists()) return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "File not found")
+
+        return try {
+            val fis = FileInputStream(file)
+            newFixedLengthResponse(Response.Status.OK, "video/mp4", fis, file.length())
+        } catch (e: Exception) {
+            newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", e.message)
         }
     }
 
@@ -63,6 +164,7 @@ class DeviceServer(
                     }
                     .btn-play { background-color: #4CAF50; }
                     .btn-stop { background-color: #f44336; }
+                    .btn-videos { background-color: #2196F3; }
                     button:active { opacity: 0.7; }
                     .info-panel { background: #eee; padding: 10px; border-radius: 8px; margin: 10px; font-size: 16px; }
                     #motion-time { font-weight: bold; color: #d32f2f; }
@@ -114,12 +216,14 @@ class DeviceServer(
                     <button class="btn-play" onclick="sendCommand('/play')">🔊 PLAY</button>
                     <br>
                     <button class="btn-stop" onclick="sendCommand('/stop')">🛑 STOP</button>
+                    <br>
+                    <button class="btn-videos" onclick="location.href='/videos'">📂 VIEW RECORDINGS</button>
                     <div id="status">Waiting for commands...</div>
                 </div>
             </body>
             </html>
         """.trimIndent()
-        return newFixedLengthResponse(Response.Status.OK, "text/html", html)
+        return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", html)
     }
 
     inner class MjpegInputStream : InputStream() {
