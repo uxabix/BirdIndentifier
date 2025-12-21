@@ -27,7 +27,7 @@ class CameraService : Service(), LifecycleOwner {
     private val lifecycleRegistry = LifecycleRegistry(this)
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private lateinit var deviceServer: DeviceServer
-    private var previousYPlane: ByteArray? = null // Store the Y plane of the previous frame
+    private var previousYPlane: ByteArray? = null
     private var framesRemainingAfterMotion = 0
     private val MOTION_POST_DELAY_FRAMES = 300
 
@@ -57,11 +57,8 @@ class CameraService : Service(), LifecycleOwner {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // Compares the luminance (Y) planes of two images to detect motion.
-    // Comparing raw luminance is more reliable than comparing compressed JPEGs.
     fun hasMotion(prevYPlane: ByteArray?, currYPlane: ByteArray, threshold: Int = 10): Boolean {
         if (prevYPlane == null || prevYPlane.size != currYPlane.size) {
-            // If there's no previous frame or dimensions changed, assume motion.
             return true
         }
         if (currYPlane.isEmpty()) return false
@@ -71,7 +68,6 @@ class CameraService : Service(), LifecycleOwner {
             diff += kotlin.math.abs(currYPlane[i].toInt() - prevYPlane[i].toInt())
         }
         val avgDifference = diff / currYPlane.size
-        // Log.d("CameraService", "Average pixel difference: $avgDifference")
         return avgDifference > threshold
     }
 
@@ -85,7 +81,6 @@ class CameraService : Service(), LifecycleOwner {
                 .build()
 
             imageAnalysis.setAnalyzer(cameraExecutor) { image ->
-                // Extract the luminance plane (Y)
                 val yBuffer = image.planes[0].buffer
                 val ySize = yBuffer.remaining()
                 val currentYPlane = ByteArray(ySize)
@@ -94,38 +89,28 @@ class CameraService : Service(), LifecycleOwner {
                 val motionDetected = hasMotion(previousYPlane, currentYPlane)
 
                 if (motionDetected) {
+                    FrameBuffer.lastMotionTime.set(System.currentTimeMillis())
+                    
                     if (framesRemainingAfterMotion == 0) {
-                        Log.d("CameraService", "Motion detected: Starting frame transmission.")
+                        Log.d("CameraService", "Motion detected!")
                     }
                     framesRemainingAfterMotion = MOTION_POST_DELAY_FRAMES
                     
-                    // Update frame
                     val jpeg = imageToJpeg(image)
                     FrameBuffer.latestFrame.set(jpeg)
                 } else if (framesRemainingAfterMotion > 0) {
                     framesRemainingAfterMotion--
-                    
-                    // Update frame during post-motion delay
                     val jpeg = imageToJpeg(image)
                     FrameBuffer.latestFrame.set(jpeg)
-                    
-                    if (framesRemainingAfterMotion == 0) {
-                        Log.d("CameraService", "No motion for $MOTION_POST_DELAY_FRAMES frames: Stopping frame transmission.")
-                    }
                 }
 
-                // Store the current Y plane for the next frame's comparison
                 previousYPlane = currentYPlane
                 image.close()
             }
 
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
             cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(
-                this,
-                cameraSelector,
-                imageAnalysis
-            )
+            cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis)
 
         }, ContextCompat.getMainExecutor(this))
     }
@@ -134,22 +119,16 @@ class CameraService : Service(), LifecycleOwner {
         val yBuffer = image.planes[0].buffer
         val uBuffer = image.planes[1].buffer
         val vBuffer = image.planes[2].buffer
-
-        // Rewind buffers before reading. The Y buffer might have been read for motion detection.
         yBuffer.rewind()
         uBuffer.rewind()
         vBuffer.rewind()
-
         val ySize = yBuffer.remaining()
         val uSize = uBuffer.remaining()
         val vSize = vBuffer.remaining()
-
         val nv21 = ByteArray(ySize + uSize + vSize)
-
         yBuffer.get(nv21, 0, ySize)
         vBuffer.get(nv21, ySize, vSize)
         uBuffer.get(nv21, ySize + vSize, uSize)
-
         val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
         val out = ByteArrayOutputStream()
         yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 80, out)
@@ -158,23 +137,15 @@ class CameraService : Service(), LifecycleOwner {
 
     private fun startForegroundNotification() {
         val channelId = "camera_stream"
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                channelId,
-                "Camera Streaming",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            getSystemService(NotificationManager::class.java)
-                .createNotificationChannel(channel)
+            val channel = NotificationChannel(channelId, "Camera Streaming", NotificationManager.IMPORTANCE_LOW)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
-
         val notification = NotificationCompat.Builder(this, channelId)
             .setContentTitle("MJPEG Camera")
             .setContentText("Streaming active")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .build()
-
         startForeground(1, notification)
     }
 
