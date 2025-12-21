@@ -26,7 +26,7 @@ class CameraService : Service(), LifecycleOwner {
 
     private val lifecycleRegistry = LifecycleRegistry(this)
     private val cameraExecutor = Executors.newSingleThreadExecutor()
-    private lateinit var mjpegServer: MjpegServer
+    private lateinit var deviceServer: DeviceServer
     private var previousYPlane: ByteArray? = null // Store the Y plane of the previous frame
     private var framesRemainingAfterMotion = 0
     private val MOTION_POST_DELAY_FRAMES = 300
@@ -51,7 +51,7 @@ class CameraService : Service(), LifecycleOwner {
     override fun onDestroy() {
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
         cameraExecutor.shutdown()
-        mjpegServer.stop()
+        deviceServer.stop()
         super.onDestroy()
     }
 
@@ -179,7 +179,7 @@ class CameraService : Service(), LifecycleOwner {
     }
 
     private fun startMjpegServer() {
-        mjpegServer = MjpegServer(8080, FrameBuffer.latestFrame)
-        mjpegServer.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+        deviceServer = DeviceServer(8080, FrameBuffer.latestFrame, this)
+        deviceServer.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
     }
 }
