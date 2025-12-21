@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import android.os.StatFs
+import android.provider.DocumentsContract
+import android.system.Os
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
@@ -91,15 +93,17 @@ object StorageManager {
             .sortedBy { it.lastModified() }
 
         var totalSize = files.sumOf { it.length() }
+        var freeBytes = getFreeSpaceSaf(context, treeUri)
         
         for (file in files) {
-            if (totalSize <= maxTotal) break
+            if (totalSize <= maxTotal && freeBytes >= minFree) break
             if (isImportant(file.name ?: "")) continue
             
             val size = file.length()
             if (file.delete()) {
                 totalSize -= size
-                Log.d(TAG, "Deleted old video: ${file.name}")
+                freeBytes += size
+                Log.d(TAG, "Deleted old SAF video: ${file.name}")
             }
         }
     }
@@ -130,7 +134,7 @@ object StorageManager {
         val settings = getSettings(context)
         val maxTotalBytes = (settings.maxTotalSizeGb * 1024 * 1024 * 1024).toLong()
         val minFreeBytes = (settings.minFreeSpaceGb * 1024 * 1024 * 1024).toLong()
-        val warningThresholdBytes = (1.0f * 1024 * 1024 * 1024).toLong() // 1GB threshold
+        val warningThresholdBytes = (1.0f * 1024 * 1024 * 1024).toLong()
 
         val sharedPrefs = context.getSharedPreferences("BirdPrefs", Context.MODE_PRIVATE)
         val folderUriString = sharedPrefs.getString("save_folder_uri", null)
@@ -145,12 +149,7 @@ object StorageManager {
                 ?.filter { it.name?.lowercase()?.endsWith(".mp4") == true }
                 ?.sumOf { it.length() } ?: 0L
             
-            // For SAF it's hard to get disk free space, so we use internal as approximation or skip
-            val internalDir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-            if (internalDir != null) {
-                val stat = StatFs(internalDir.path)
-                freeOnDisk = stat.availableBlocksLong * stat.blockSizeLong
-            }
+            freeOnDisk = getFreeSpaceSaf(context, treeUri)
         } else {
             val internalDir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
             if (internalDir != null) {
@@ -172,6 +171,27 @@ object StorageManager {
             maxQuotaBytes = maxTotalBytes,
             minFreeBytes = minFreeBytes
         )
+    }
+
+    private fun getFreeSpaceSaf(context: Context, treeUri: Uri): Long {
+        return try {
+            // Correct way to get a FileDescriptor for a Tree URI is to build its document URI
+            val docId = DocumentsContract.getTreeDocumentId(treeUri)
+            val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
+            
+            val pfd = context.contentResolver.openFileDescriptor(docUri, "r")
+            if (pfd != null) {
+                val stats = Os.fstatvfs(pfd.fileDescriptor)
+                val bytes = stats.f_bavail * stats.f_frsize
+                pfd.close()
+                if (bytes > 0) return bytes
+            }
+            0L
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get free space for SAF via fstatvfs: ${e.message}")
+            // Fallback: try internal dir free space as a last resort
+            context.getExternalFilesDir(null)?.freeSpace ?: 0L
+        }
     }
 
     fun hasEnoughSpace(context: Context): Boolean {
