@@ -26,10 +26,25 @@ class DeviceServer(
             "/videos" -> listVideos()
             "/video" -> serveVideo(session.parameters["name"]?.firstOrNull())
             "/delete-video" -> deleteVideo(session.parameters["name"]?.firstOrNull())
+            "/mark-important" -> markImportant(session.parameters["name"]?.firstOrNull(), session.parameters["important"]?.firstOrNull() == "true")
+            "/update-storage-settings" -> updateStorageSettings(session.parameters)
             "/reset-folder" -> resetFolder()
             "/" -> createHtmlResponse("Camera control")
             else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found")
         }
+    }
+
+    private fun markImportant(name: String?, important: Boolean): Response {
+        if (name == null) return newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Missing name")
+        StorageManager.markImportant(context, name, important)
+        return newFixedLengthResponse(Response.Status.REDIRECT, "text/plain", "").apply { addHeader("Location", "/videos") }
+    }
+
+    private fun updateStorageSettings(params: Map<String, List<String>>): Response {
+        val maxTotal = params["max_total"]?.firstOrNull()?.toFloatOrNull() ?: 5.0f
+        val minFree = params["min_free"]?.firstOrNull()?.toFloatOrNull() ?: 1.0f
+        StorageManager.saveSettings(context, maxTotal, minFree)
+        return newFixedLengthResponse(Response.Status.REDIRECT, "text/plain", "").apply { addHeader("Location", "/") }
     }
 
     private fun resetFolder(): Response {
@@ -85,21 +100,30 @@ class DeviceServer(
     }
 
     private fun listVideos(): Response {
-        val allFiles = mutableListOf<Pair<String, Long>>()
+        val allFiles = mutableListOf<Triple<String, Long, Boolean>>()
         val internalDir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-        internalDir?.listFiles { f -> f.extension.lowercase() == "mp4" }?.forEach { allFiles.add(it.name to it.length()) }
+        internalDir?.listFiles { f -> f.extension.lowercase() == "mp4" }?.forEach { 
+            allFiles.add(Triple(it.name, it.length(), StorageManager.isImportant(it.name))) 
+        }
 
         val sharedPrefs = context.getSharedPreferences("BirdPrefs", Context.MODE_PRIVATE)
         sharedPrefs.getString("save_folder_uri", null)?.let { uriStr ->
             DocumentFile.fromTreeUri(context, Uri.parse(uriStr))?.listFiles()?.forEach { 
-                if (it.name?.lowercase()?.endsWith(".mp4") == true) { allFiles.add(it.name!! to it.length()) }
+                if (it.name?.lowercase()?.endsWith(".mp4") == true) { 
+                    allFiles.add(Triple(it.name!!, it.length(), StorageManager.isImportant(it.name!!))) 
+                }
             }
         }
 
         val sortedFiles = allFiles.distinctBy { it.first }.sortedByDescending { it.first }
-        val listHtml = sortedFiles.joinToString("") { (name, size) ->
+        val listHtml = sortedFiles.joinToString("") { (name, size, important) ->
+            val impBtn = if (important) 
+                "<button class='imp-btn active' onclick=\"location.href='/mark-important?name=$name&important=false'\">★</button>" 
+            else 
+                "<button class='imp-btn' onclick=\"location.href='/mark-important?name=$name&important=true'\">☆</button>"
+            
             "<li><div class='video-info'><a href='/video?name=$name'>$name</a><span class='file-size'>(${size / 1024} KB)</span></div>" +
-            "<button class='delete-btn' onclick=\"if(confirm('Delete $name?')) location.href='/delete-video?name=$name'\">🗑️</button></li>"
+            "<div class='actions'>$impBtn <button class='delete-btn' onclick=\"if(confirm('Delete $name?')) location.href='/delete-video?name=$name'\">🗑️</button></div></li>"
         }
 
         val html = """
@@ -118,7 +142,10 @@ class DeviceServer(
                     .video-info { display: flex; flex-direction: column; padding-right: 10px; }
                     .file-size { color:#888; font-size: 0.85em; margin-top: 4px; }
                     a { text-decoration: none; color: #2196F3; font-weight: bold; word-break: break-all; }
-                    .delete-btn { background: #fff5f5; border: 1px solid #ffcdd2; color: #d32f2f; padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 0.9em; font-weight: bold; flex-shrink: 0; }
+                    .actions { display: flex; align-items: center; gap: 10px; }
+                    .delete-btn { background: #fff5f5; border: 1px solid #ffcdd2; color: #d32f2f; padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 0.9em; font-weight: bold; }
+                    .imp-btn { background: none; border: 1px solid #ccc; font-size: 1.5em; cursor: pointer; border-radius: 6px; padding: 0 5px; }
+                    .imp-btn.active { color: #FFD700; border-color: #FFD700; }
                     .back-link { display: inline-block; margin-bottom: 20px; color: #666; font-weight: bold; text-decoration: none; }
                 </style>
             </head>
@@ -151,6 +178,19 @@ class DeviceServer(
 
     private fun createHtmlResponse(status: String): Response {
         val folderName = getCurrentFolderDisplayName()
+        val settings = StorageManager.getSettings(context)
+        val storageStatus = StorageManager.getStorageStatus(context)
+        
+        val usedGb = "%.2f".format(storageStatus.totalUsedByAppBytes / (1024.0 * 1024.0 * 1024.0))
+        val freeGb = "%.2f".format(storageStatus.freeOnDiskBytes / (1024.0 * 1024.0 * 1024.0))
+
+        val alertsHtml = StringBuilder()
+        if (storageStatus.isLowDiskSpace) {
+            alertsHtml.append("<div class='alert error'>⚠️ CRITICAL: Low Disk Space! ($freeGb GB left). Recording may stop.</div>")
+        } else if (storageStatus.isApproachingMaxQuota) {
+            alertsHtml.append("<div class='alert warning'>⚠️ Warning: Approaching Max Storage Quota. ($usedGb GB used).</div>")
+        }
+
         val html = """
             <!DOCTYPE html>
             <html>
@@ -166,9 +206,16 @@ class DeviceServer(
                     .btn-play { background-color: #4CAF50; }
                     .btn-stop { background-color: #f44336; }
                     .btn-videos { background-color: #2196F3; }
+                    .btn-save { background-color: #2196F3; width: auto; padding: 8px 20px; font-size: 14px; }
                     .btn-reset { background-color: #607D8B; font-size: 14px; padding: 10px; width: auto; }
                     .info-panel { background: #eee; padding: 10px; border-radius: 8px; margin: 10px; font-size: 16px; }
-                    .folder-panel { background: #e3f2fd; padding: 10px; border-radius: 8px; margin: 10px; font-size: 14px; color: #1565C0; }
+                    .folder-panel, .storage-settings { background: #e3f2fd; padding: 15px; border-radius: 8px; margin: 10px; font-size: 14px; color: #1565C0; text-align: left; }
+                    .storage-settings h3 { margin-top: 0; }
+                    .storage-settings input { width: 60px; padding: 5px; margin: 5px; }
+                    .alert { padding: 12px; border-radius: 8px; margin: 10px; font-weight: bold; text-align: center; }
+                    .error { background-color: #ffebee; color: #c62828; border: 1px solid #ef9a9a; }
+                    .warning { background-color: #fffde7; color: #f57f17; border: 1px solid #fff59d; }
+                    .storage-info { font-size: 0.9em; color: #555; margin-top: 5px; }
                     #motion-time { font-weight: bold; color: #d32f2f; }
                     #status { color: #666; font-size: 14px; margin-top: 10px; }
                 </style>
@@ -188,12 +235,28 @@ class DeviceServer(
             <body>
                 <div class="container">
                     <h2>$status</h2>
+                    
+                    $alertsHtml
+
                     <img src="/mjpeg" alt="Camera Stream">
                     <div class="info-panel">Last movement: <span id="motion-time">Loading...</span></div>
+                    
                     <div class="folder-panel">
                         Saving to: <strong>$folderName</strong><br>
+                        <div class="storage-info">App usage: $usedGb GB / Max: ${settings.maxTotalSizeGb} GB</div>
+                        <div class="storage-info">Disk Free: $freeGb GB</div>
                         <button class="btn-reset" onclick="if(confirm('Reset to internal storage?')) location.href='/reset-folder'">Reset to Default</button>
                     </div>
+
+                    <div class="storage-settings">
+                        <h3>Storage Cleanup Settings</h3>
+                        <form action="/update-storage-settings" method="get">
+                            Max total size (GB): <input type="number" step="0.1" name="max_total" value="${settings.maxTotalSizeGb}"><br>
+                            Min free space (GB): <input type="number" step="0.1" name="min_free" value="${settings.minFreeSpaceGb}"><br>
+                            <button type="submit" class="btn-save">Save Settings</button>
+                        </form>
+                    </div>
+
                     <button class="btn-play" onclick="sendCommand('/play')">🔊 PLAY</button><br>
                     <button class="btn-stop" onclick="sendCommand('/stop')">🛑 STOP</button><br>
                     <button class="btn-videos" onclick="location.href='/videos'">📂 VIEW RECORDINGS</button>

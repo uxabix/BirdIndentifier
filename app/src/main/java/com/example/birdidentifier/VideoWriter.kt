@@ -20,6 +20,14 @@ class VideoWriter(private val context: Context) {
         if (frames.isEmpty()) return
 
         val thread = Thread {
+            // Run cleanup before saving
+            StorageManager.checkAndCleanup(context)
+            
+            if (!StorageManager.hasEnoughSpace(context)) {
+                Log.e(TAG, "Cannot save video: Not enough free space even after cleanup!")
+                return@Thread
+            }
+
             var codec: MediaCodec? = null
             var muxer: MediaMuxer? = null
             var pfd: android.os.ParcelFileDescriptor? = null
@@ -42,16 +50,13 @@ class VideoWriter(private val context: Context) {
                     if (videoFile != null) {
                         pfd = context.contentResolver.openFileDescriptor(videoFile.uri, "rw")
                         muxer = MediaMuxer(pfd!!.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-                        Log.d(TAG, "Saving to SAF: ${videoFile.uri}")
                     }
                 }
 
                 if (muxer == null) {
-                    // Fallback to internal storage
                     val outputDir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
                     val outputFile = File(outputDir, fileName)
                     muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-                    Log.d(TAG, "Saving to Internal: ${outputFile.absolutePath}")
                 }
 
                 val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
