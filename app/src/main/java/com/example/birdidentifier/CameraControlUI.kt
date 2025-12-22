@@ -17,6 +17,18 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 
+/**
+ * A Jetpack Compose UI component that provides the main interface for controlling 
+ * the camera service and managing storage settings.
+ *
+ * It allows the user to:
+ * - View and change the storage location for recorded videos.
+ * - Start the camera stream (via a foreground service).
+ * - Stop the camera stream.
+ *
+ * It monitors [android.content.SharedPreferences] to keep the UI in sync with storage location 
+ * changes made elsewhere (e.g., from the web interface).
+ */
 @Composable
 fun CameraControlUI() {
     val context = LocalContext.current
@@ -41,6 +53,10 @@ fun CameraControlUI() {
         }
     }
 
+    /**
+     * Launcher for requesting camera permission. 
+     * Starts the [CameraService] if permission is granted.
+     */
     val cameraLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted: Boolean ->
@@ -52,6 +68,10 @@ fun CameraControlUI() {
         }
     }
 
+    /**
+     * Launcher for selecting a folder using the Storage Access Framework (SAF).
+     * Grants persistable permissions and saves the URI to [android.content.SharedPreferences].
+     */
     val folderLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri: Uri? ->

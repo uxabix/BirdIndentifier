@@ -11,16 +11,34 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
+/**
+ * A utility class responsible for encoding a sequence of JPEG frames into an MP4 video file.
+ *
+ * It uses [MediaCodec] for AVC encoding and [MediaMuxer] to package the encoded stream. 
+ * The writer handles both internal storage and external storage via the Storage Access Framework (SAF).
+ *
+ * @param context The Android context used for content resolution and file management.
+ */
 class VideoWriter(private val context: Context) {
 
     private val TAG = "VideoWriter"
-    private val BIT_RATE = 2000000 // 2 Mbps
+    
+    /** Target bitrate for the video encoder: 2 Mbps. */
+    private val BIT_RATE = 2000000
 
+    /**
+     * Encodes a list of JPEG frames into an MP4 video file on a background thread.
+     *
+     * This method calculates the average FPS based on frame timestamps and automatically 
+     * triggers storage cleanup via [StorageManager] before starting the write process.
+     *
+     * @param frames A list of [Pair]s, where each pair contains JPEG byte data and a millisecond timestamp.
+     */
     fun saveVideoWithTimestamps(frames: List<Pair<ByteArray, Long>>) {
         if (frames.isEmpty()) return
 
         val thread = Thread {
-            // Run cleanup before saving
+            // Ensure there is enough space before starting the encoding process
             StorageManager.checkAndCleanup(context)
 
             if (!StorageManager.hasEnoughSpace(context)) {
@@ -32,6 +50,7 @@ class VideoWriter(private val context: Context) {
             var muxer: MediaMuxer? = null
             var pfd: android.os.ParcelFileDescriptor? = null
             try {
+                // Calculate actual frames per second from capture data
                 val totalTimeMs = frames.last().second - frames.first().second
                 val averageFps = if (totalTimeMs > 0) (frames.size * 1000f / totalTimeMs) else 0f
                 val configFps = if (averageFps > 1) averageFps.toInt() else 30
@@ -43,6 +62,7 @@ class VideoWriter(private val context: Context) {
                 val sharedPrefs = context.getSharedPreferences("BirdPrefs", Context.MODE_PRIVATE)
                 val folderUriString = sharedPrefs.getString("save_folder_uri", null)
 
+                // Attempt to use user-selected folder (SAF)
                 if (folderUriString != null) {
                     val treeUri = Uri.parse(folderUriString)
                     val pickedDir = DocumentFile.fromTreeUri(context, treeUri)
@@ -56,6 +76,7 @@ class VideoWriter(private val context: Context) {
                     }
                 }
 
+                // Fallback to internal app movies directory
                 if (muxer == null) {
                     val outputDir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
                     val outputFile = File(outputDir, fileName)
@@ -65,6 +86,7 @@ class VideoWriter(private val context: Context) {
                     )
                 }
 
+                // Identify resolution from the first frame
                 val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeByteArray(frames[0].first, 0, frames[0].first.size, options)
                 val width = options.outWidth
@@ -89,7 +111,7 @@ class VideoWriter(private val context: Context) {
                 val bufferInfo = MediaCodec.BufferInfo()
 
                 for (i in frames.indices) {
-                    val startTime = System.currentTimeMillis()
+                    // Simulate frame intervals to match capture speed
                     if (i > 0) {
                         val interval = frames[i].second - frames[i - 1].second
                         if (interval > 0) Thread.sleep(interval)
@@ -117,12 +139,23 @@ class VideoWriter(private val context: Context) {
                     muxer?.stop(); muxer?.release()
                     pfd?.close()
                 } catch (e: Exception) {
+                    // Silently ignore close errors
                 }
             }
         }
         thread.start()
     }
 
+    /**
+     * Extracts encoded data from the [MediaCodec] and writes it to the [MediaMuxer].
+     *
+     * @param codec The active [MediaCodec] instance.
+     * @param muxer The active [MediaMuxer] instance.
+     * @param bufferInfo Reusable info object for buffer metadata.
+     * @param currentTrackIndex The current muxer track index, or -1 if the track hasn't been added.
+     * @param endOfStream Whether this is the final drain call.
+     * @return The updated track index after adding the format to the muxer.
+     */
     private fun drainEncoder(
         codec: MediaCodec,
         muxer: MediaMuxer,

@@ -1,6 +1,7 @@
 package com.example.birdidentifier
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Environment
 import android.os.StatFs
@@ -10,9 +11,25 @@ import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
 
+/**
+ * A comprehensive storage management singleton for the Bird Identifier app.
+ *
+ * This object handles:
+ * - Tracking and enforcing storage quotas (max total size).
+ * - Monitoring free disk space.
+ * - Cleaning up old video recordings to make room for new ones.
+ * - Marking files as "Important" to protect them from automatic deletion.
+ * - Abstracting file operations between internal storage and the Storage Access Framework (SAF).
+ */
 object StorageManager {
     private const val TAG = "StorageManager"
 
+    /**
+     * Retrieves the user-configured storage settings from [android.content.SharedPreferences].
+     *
+     * @param context The Android context used to access preferences.
+     * @return A [StorageSettings] object containing current limits.
+     */
     fun getSettings(context: Context): StorageSettings {
         val prefs = context.getSharedPreferences("BirdPrefs", Context.MODE_PRIVATE)
         return StorageSettings(
@@ -21,6 +38,13 @@ object StorageManager {
         )
     }
 
+    /**
+     * Persists new storage quota settings to [android.content.SharedPreferences].
+     *
+     * @param context The Android context used to access preferences.
+     * @param maxTotal The maximum total size in GB allowed for all videos.
+     * @param minFree The minimum free space in GB required on disk.
+     */
     fun saveSettings(context: Context, maxTotal: Float, minFree: Float) {
         val prefs = context.getSharedPreferences("BirdPrefs", Context.MODE_PRIVATE)
         prefs.edit()
@@ -29,10 +53,26 @@ object StorageManager {
             .apply()
     }
 
+    /**
+     * Checks if a filename indicates that the video is marked as important.
+     *
+     * @param fileName The name of the file to check.
+     * @return True if the filename contains the "_IMPORTANT" tag.
+     */
     fun isImportant(fileName: String): Boolean {
         return fileName.contains("_IMPORTANT", ignoreCase = true)
     }
 
+    /**
+     * Renames a video file to include or remove the "_IMPORTANT" tag.
+     *
+     * Files marked as important are excluded from the automatic cleanup process.
+     *
+     * @param context The Android context.
+     * @param fileName The current name of the file.
+     * @param important Whether to mark (true) or unmark (false) the file.
+     * @return True if the rename operation was successful.
+     */
     fun markImportant(context: Context, fileName: String, important: Boolean): Boolean {
         val fileObj = getFileFromAnywhere(context, fileName) ?: return false
         val newName = if (important) {
@@ -49,11 +89,17 @@ object StorageManager {
                 val newFile = File(fileObj.parent, newName)
                 fileObj.renameTo(newFile)
             }
-
             else -> false
         }
     }
 
+    /**
+     * Finds a file in either the custom SAF folder or the default internal movies directory.
+     *
+     * @param context The Android context.
+     * @param fileName The name of the file to locate.
+     * @return A [DocumentFile], [File], or null if the file does not exist.
+     */
     private fun getFileFromAnywhere(context: Context, fileName: String): Any? {
         val sharedPrefs = context.getSharedPreferences("BirdPrefs", Context.MODE_PRIVATE)
         val folderUriString = sharedPrefs.getString("save_folder_uri", null)
@@ -71,6 +117,14 @@ object StorageManager {
         return null
     }
 
+    /**
+     * Triggers the storage cleanup process based on current settings.
+     *
+     * This method will delete the oldest non-important videos until the total size 
+     * is within the quota AND the minimum free disk space is restored.
+     *
+     * @param context The Android context.
+     */
     fun checkAndCleanup(context: Context) {
         val settings = getSettings(context)
         val maxTotalBytes = (settings.maxTotalSizeGb * 1024 * 1024 * 1024).toLong()
@@ -87,6 +141,9 @@ object StorageManager {
         }
     }
 
+    /**
+     * Performs cleanup on a folder accessed via the Storage Access Framework (SAF).
+     */
     private fun cleanupFolder(context: Context, treeUri: Uri, maxTotal: Long, minFree: Long) {
         val root = DocumentFile.fromTreeUri(context, treeUri) ?: return
         val files = root.listFiles()
@@ -109,6 +166,9 @@ object StorageManager {
         }
     }
 
+    /**
+     * Performs cleanup on a standard Java [File] directory (internal storage).
+     */
     private fun cleanupInternalFolder(dir: File, maxTotal: Long, minFree: Long) {
         val files = dir.listFiles { f -> f.extension.lowercase() == "mp4" }
             ?.sortedBy { it.lastModified() } ?: return
@@ -131,10 +191,18 @@ object StorageManager {
         }
     }
 
+    /**
+     * Calculates the current storage usage and disk health.
+     *
+     * @param context The Android context.
+     * @return A [StorageStatus] object containing metrics and warning flags.
+     */
     fun getStorageStatus(context: Context): StorageStatus {
         val settings = getSettings(context)
         val maxTotalBytes = (settings.maxTotalSizeGb * 1024 * 1024 * 1024).toLong()
         val minFreeBytes = (settings.minFreeSpaceGb * 1024 * 1024 * 1024).toLong()
+        
+        /** Threshold to warn user before they hit the absolute quota limit (1 GB). */
         val warningThresholdBytes = (1.0f * 1024 * 1024 * 1024).toLong()
 
         val sharedPrefs = context.getSharedPreferences("BirdPrefs", Context.MODE_PRIVATE)
@@ -174,9 +242,12 @@ object StorageManager {
         )
     }
 
+    /**
+     * Specialized helper to get free space from a Storage Access Framework URI.
+     * Uses [Os.fstatvfs] via a file descriptor.
+     */
     private fun getFreeSpaceSaf(context: Context, treeUri: Uri): Long {
         return try {
-            // Correct way to get a FileDescriptor for a Tree URI is to build its document URI
             val docId = DocumentsContract.getTreeDocumentId(treeUri)
             val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
 
@@ -190,20 +261,28 @@ object StorageManager {
             0L
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get free space for SAF via fstatvfs: ${e.message}")
-            // Fallback: try internal dir free space as a last resort
             context.getExternalFilesDir(null)?.freeSpace ?: 0L
         }
     }
 
+    /**
+     * Convenience method to check if a new recording can be safely started.
+     */
     fun hasEnoughSpace(context: Context): Boolean {
         return !getStorageStatus(context).isLowDiskSpace
     }
 
+    /**
+     * Data class representing storage configuration limits.
+     */
     data class StorageSettings(
         val maxTotalSizeGb: Float,
         val minFreeSpaceGb: Float
     )
 
+    /**
+     * Data class representing current storage metrics and health flags.
+     */
     data class StorageStatus(
         val totalUsedByAppBytes: Long,
         val freeOnDiskBytes: Long,

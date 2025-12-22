@@ -33,11 +33,11 @@
     <script>
         function sendCommand(path) { fetch(path).then(() => { 
             document.getElementById('status').innerText = 'Command ' + path + ' was sent';
-            if(path === '/start-rec' || path === '/stop-rec') setTimeout(updateRecStatus, 500);
+            if(path === '{{ROUTE_START_REC}}' || path === '{{ROUTE_STOP_REC}}') setTimeout(updateRecStatus, 500);
         }); }
         
         function updateMotionStatus() {
-            fetch('/motion-status').then(r => r.text()).then(t => {
+            fetch('{{ROUTE_MOTION_STATUS}}').then(r => r.text()).then(t => {
                 if (t === "0") { document.getElementById('motion-time').innerText = "No movement detected"; } else {
                     const d = new Date(parseInt(t));
                     document.getElementById('motion-time').innerText = d.toLocaleTimeString() + "." + String(d.getMilliseconds()).padStart(3, '0');
@@ -46,7 +46,7 @@
         }
         
         function updateRecStatus() {
-            fetch('/rec-status').then(r => r.text()).then(status => {
+            fetch('{{ROUTE_REC_STATUS}}').then(r => r.text()).then(status => {
                 const btnStart = document.getElementById('btn-rec-start');
                 const btnStop = document.getElementById('btn-rec-stop');
                 const indicator = document.getElementById('rec-indicator');
@@ -75,34 +75,34 @@
         {{alertsHtml}}
 
         <div id="rec-indicator" style="margin-bottom: 10px; font-weight: bold;">Checking status...</div>
-        <img src="/mjpeg" alt="Camera Stream">
+        <img src="{{ROUTE_MJPEG}}" alt="Camera Stream">
         
         <div class="info-panel">Last movement: <span id="motion-time">Loading...</span></div>
         
         <div style="margin: 15px 0;">
-            <button id="btn-rec-start" class="btn-rec-start" onclick="sendCommand('/start-rec')">🔴 START MANUAL RECORDING</button>
-            <button id="btn-rec-stop" class="btn-rec-stop" onclick="sendCommand('/stop-rec')" style="display:none;">⏹️ STOP RECORDING</button>
+            <button id="btn-rec-start" class="btn-rec-start" onclick="sendCommand('{{ROUTE_START_REC}}')">🔴 START MANUAL RECORDING</button>
+            <button id="btn-rec-stop" class="btn-rec-stop" onclick="sendCommand('{{ROUTE_STOP_REC}}')" style="display:none;">⏹️ STOP RECORDING</button>
         </div>
 
         <div class="folder-panel">
             Saving to: <strong>{{folderName}}</strong><br>
             <div class="storage-info">App usage: {{usedGb}} GB / Max: {{maxTotalSizeGb}} GB</div>
             <div class="storage-info">Disk Free: {{freeGb}} GB</div>
-            <button class="btn-reset" onclick="if(confirm('Reset to internal storage?')) location.href='/reset-folder'">Reset to Default</button>
+            <button class="btn-reset" onclick="if(confirm('Reset to internal storage?')) location.href='{{ROUTE_RESET_FOLDER}}'">Reset to Default</button>
         </div>
 
         <div class="storage-settings">
             <h3>Storage Cleanup Settings</h3>
-            <form action="/update-storage-settings" method="get">
+            <form action="{{ROUTE_UPDATE_SETTINGS}}" method="get">
                 Max total size (GB): <input type="number" step="0.1" name="max_total" value="{{maxTotalSizeGb}}"><br>
                 Min free space (GB): <input type="number" step="0.1" name="min_free" value="{{minFreeSpaceGb}}"><br>
                 <button type="submit" class="btn-save">Save Settings</button>
             </form>
         </div>
 
-        <button class="btn-play" onclick="sendCommand('/play')">🔊 PLAY</button><br>
-        <button class="btn-stop" onclick="sendCommand('/stop')">🛑 STOP</button><br>
-        <button class="btn-videos" onclick="location.href='/videos'">📂 VIEW RECORDINGS</button>
+        <button class="btn-play" onclick="sendCommand('{{ROUTE_PLAY}}')">🔊 PLAY</button><br>
+        <button class="btn-stop" onclick="sendCommand('{{ROUTE_STOP}}')">🛑 STOP</button><br>
+        <button class="btn-videos" onclick="location.href='{{ROUTE_VIDEOS_LIST}}'">📂 VIEW RECORDINGS</button>
         <div id="status">Waiting for commands...</div>
     </div>
 </body>
