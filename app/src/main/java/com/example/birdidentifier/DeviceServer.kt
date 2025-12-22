@@ -29,6 +29,16 @@ class DeviceServer(
             "/mark-important" -> markImportant(session.parameters["name"]?.firstOrNull(), session.parameters["important"]?.firstOrNull() == "true")
             "/update-storage-settings" -> updateStorageSettings(session.parameters)
             "/reset-folder" -> resetFolder()
+            "/start-rec" -> {
+                FrameBuffer.isManualRecording.set(true)
+                createHtmlResponse("Recording started")
+            }
+            "/stop-rec" -> {
+                FrameBuffer.isManualRecording.set(false)
+                // The CameraService will handle finalizing in the next frame cycle
+                createHtmlResponse("Recording stopping...")
+            }
+            "/rec-status" -> newFixedLengthResponse(Response.Status.OK, "text/plain", FrameBuffer.isManualRecording.get().toString())
             "/" -> createHtmlResponse("Camera control")
             else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found")
         }
@@ -208,6 +218,8 @@ class DeviceServer(
                     .btn-videos { background-color: #2196F3; }
                     .btn-save { background-color: #2196F3; width: auto; padding: 8px 20px; font-size: 14px; }
                     .btn-reset { background-color: #607D8B; font-size: 14px; padding: 10px; width: auto; }
+                    .btn-rec-start { background-color: #e53935; }
+                    .btn-rec-stop { background-color: #000000; border: 2px solid #e53935; }
                     .info-panel { background: #eee; padding: 10px; border-radius: 8px; margin: 10px; font-size: 16px; }
                     .folder-panel, .storage-settings { background: #e3f2fd; padding: 15px; border-radius: 8px; margin: 10px; font-size: 14px; color: #1565C0; text-align: left; }
                     .storage-settings h3 { margin-top: 0; }
@@ -216,11 +228,18 @@ class DeviceServer(
                     .error { background-color: #ffebee; color: #c62828; border: 1px solid #ef9a9a; }
                     .warning { background-color: #fffde7; color: #f57f17; border: 1px solid #fff59d; }
                     .storage-info { font-size: 0.9em; color: #555; margin-top: 5px; }
+                    .rec-status { font-weight: bold; padding: 5px; border-radius: 4px; }
+                    .rec-on { color: #e53935; animation: blink 1s infinite; }
                     #motion-time { font-weight: bold; color: #d32f2f; }
                     #status { color: #666; font-size: 14px; margin-top: 10px; }
+                    @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
                 </style>
                 <script>
-                    function sendCommand(path) { fetch(path).then(() => { document.getElementById('status').innerText = 'Command ' + path + ' was sent'; }); }
+                    function sendCommand(path) { fetch(path).then(() => { 
+                        document.getElementById('status').innerText = 'Command ' + path + ' was sent';
+                        if(path === '/start-rec' || path === '/stop-rec') setTimeout(updateRecStatus, 500);
+                    }); }
+                    
                     function updateMotionStatus() {
                         fetch('/motion-status').then(r => r.text()).then(t => {
                             if (t === "0") { document.getElementById('motion-time').innerText = "No movement detected"; } else {
@@ -229,7 +248,28 @@ class DeviceServer(
                             }
                         });
                     }
+                    
+                    function updateRecStatus() {
+                        fetch('/rec-status').then(r => r.text()).then(status => {
+                            const btnStart = document.getElementById('btn-rec-start');
+                            const btnStop = document.getElementById('btn-rec-stop');
+                            const indicator = document.getElementById('rec-indicator');
+                            
+                            if (status === 'true') {
+                                btnStart.style.display = 'none';
+                                btnStop.style.display = 'inline-block';
+                                indicator.innerHTML = "<span class='rec-status rec-on'>● RECORDING</span>";
+                            } else {
+                                btnStart.style.display = 'inline-block';
+                                btnStop.style.display = 'none';
+                                indicator.innerHTML = "Standby";
+                            }
+                        });
+                    }
+                    
                     setInterval(updateMotionStatus, 500);
+                    setInterval(updateRecStatus, 2000);
+                    window.onload = updateRecStatus;
                 </script>
             </head>
             <body>
@@ -238,9 +278,16 @@ class DeviceServer(
                     
                     $alertsHtml
 
+                    <div id="rec-indicator" style="margin-bottom: 10px; font-weight: bold;">Checking status...</div>
                     <img src="/mjpeg" alt="Camera Stream">
+                    
                     <div class="info-panel">Last movement: <span id="motion-time">Loading...</span></div>
                     
+                    <div style="margin: 15px 0;">
+                        <button id="btn-rec-start" class="btn-rec-start" onclick="sendCommand('/start-rec')">🔴 START MANUAL RECORDING</button>
+                        <button id="id-rec-stop" class="btn-rec-stop" onclick="sendCommand('/stop-rec')" style="display:none;">⏹️ STOP RECORDING</button>
+                    </div>
+
                     <div class="folder-panel">
                         Saving to: <strong>$folderName</strong><br>
                         <div class="storage-info">App usage: $usedGb GB / Max: ${settings.maxTotalSizeGb} GB</div>
@@ -262,6 +309,10 @@ class DeviceServer(
                     <button class="btn-videos" onclick="location.href='/videos'">📂 VIEW RECORDINGS</button>
                     <div id="status">Waiting for commands...</div>
                 </div>
+                <script>
+                   // Fix for dynamic button reference since I used 'id-rec-stop' in the HTML but 'btn-rec-stop' in the JS
+                   document.getElementById('id-rec-stop').id = 'btn-rec-stop';
+                </script>
             </body>
             </html>
         """.trimIndent()

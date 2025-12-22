@@ -30,7 +30,8 @@ class CameraService : Service(), LifecycleOwner {
     private lateinit var videoWriter: VideoWriter
     private var previousYPlane: ByteArray? = null
     private var framesRemainingAfterMotion = 0
-    private val MOTION_POST_DELAY_FRAMES = 600
+    private val MOTION_POST_DELAY_FRAMES = 30 * 60 * 2 // 2 minutes at 30 fps
+    private val MAX_RECORDING_FRAMES = 30 * 60 * 20 // 20 minutes at 30fps
 
     override val lifecycle: Lifecycle
         get() = lifecycleRegistry
@@ -90,22 +91,30 @@ class CameraService : Service(), LifecycleOwner {
                 val timestamp = System.currentTimeMillis()
                 FrameBuffer.latestFrame.set(jpeg)
 
-                if (motionDetected) {
-                    if (framesRemainingAfterMotion == 0) {
+                val manualRec = FrameBuffer.isManualRecording.get()
+                
+                if (motionDetected || manualRec) {
+                    if (framesRemainingAfterMotion == 0 && !manualRec && FrameBuffer.recordingBuffer.isEmpty()) {
                         Log.d("CameraService", "Motion detected! Starting recording.")
                     }
-                    framesRemainingAfterMotion = MOTION_POST_DELAY_FRAMES
-                    FrameBuffer.recordingBuffer.add(jpeg to timestamp)
-                    FrameBuffer.lastMotionTime.set(timestamp)
+                    
+                    if (motionDetected) {
+                        framesRemainingAfterMotion = MOTION_POST_DELAY_FRAMES
+                        FrameBuffer.lastMotionTime.set(timestamp)
+                    }
+
+                    if (FrameBuffer.recordingBuffer.size < MAX_RECORDING_FRAMES) {
+                        FrameBuffer.recordingBuffer.add(jpeg to timestamp)
+                    } else if (FrameBuffer.recordingBuffer.size == MAX_RECORDING_FRAMES) {
+                        Log.w("CameraService", "Max recording length reached. Finalizing.")
+                        finalizeRecording()
+                    }
                 } else if (framesRemainingAfterMotion > 0) {
                     framesRemainingAfterMotion--
                     FrameBuffer.recordingBuffer.add(jpeg to timestamp)
                     
-                    if (framesRemainingAfterMotion == 0) {
-                        Log.d("CameraService", "Motion stopped. Saving fragment.")
-                        val framesToSave = FrameBuffer.recordingBuffer.toList()
-                        FrameBuffer.recordingBuffer.clear()
-                        videoWriter.saveVideoWithTimestamps(framesToSave)
+                    if (framesRemainingAfterMotion == 0 && !manualRec) {
+                        finalizeRecording()
                     }
                 }
 
@@ -118,6 +127,16 @@ class CameraService : Service(), LifecycleOwner {
             cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis)
 
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun finalizeRecording() {
+        if (FrameBuffer.recordingBuffer.isEmpty()) return
+        Log.d("CameraService", "Finalizing recording session.")
+        val framesToSave = FrameBuffer.recordingBuffer.toList()
+        FrameBuffer.recordingBuffer.clear()
+        framesRemainingAfterMotion = 0
+        FrameBuffer.isManualRecording.set(false)
+        videoWriter.saveVideoWithTimestamps(framesToSave)
     }
 
     private fun imageToJpeg(image: ImageProxy): ByteArray {
