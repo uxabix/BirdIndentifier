@@ -49,6 +49,7 @@ object StorageManager {
                 val newFile = File(fileObj.parent, newName)
                 fileObj.renameTo(newFile)
             }
+
             else -> false
         }
     }
@@ -56,7 +57,7 @@ object StorageManager {
     private fun getFileFromAnywhere(context: Context, fileName: String): Any? {
         val sharedPrefs = context.getSharedPreferences("BirdPrefs", Context.MODE_PRIVATE)
         val folderUriString = sharedPrefs.getString("save_folder_uri", null)
-        
+
         if (folderUriString != null) {
             val treeUri = Uri.parse(folderUriString)
             val pickedDir = DocumentFile.fromTreeUri(context, treeUri)
@@ -66,7 +67,7 @@ object StorageManager {
 
         val internalFile = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), fileName)
         if (internalFile.exists()) return internalFile
-        
+
         return null
     }
 
@@ -94,11 +95,11 @@ object StorageManager {
 
         var totalSize = files.sumOf { it.length() }
         var freeBytes = getFreeSpaceSaf(context, treeUri)
-        
+
         for (file in files) {
             if (totalSize <= maxTotal && freeBytes >= minFree) break
             if (isImportant(file.name ?: "")) continue
-            
+
             val size = file.length()
             if (file.delete()) {
                 totalSize -= size
@@ -148,7 +149,7 @@ object StorageManager {
             totalUsedByApp = pickedDir?.listFiles()
                 ?.filter { it.name?.lowercase()?.endsWith(".mp4") == true }
                 ?.sumOf { it.length() } ?: 0L
-            
+
             freeOnDisk = getFreeSpaceSaf(context, treeUri)
         } else {
             val internalDir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
@@ -178,7 +179,7 @@ object StorageManager {
             // Correct way to get a FileDescriptor for a Tree URI is to build its document URI
             val docId = DocumentsContract.getTreeDocumentId(treeUri)
             val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-            
+
             val pfd = context.contentResolver.openFileDescriptor(docUri, "r")
             if (pfd != null) {
                 val stats = Os.fstatvfs(pfd.fileDescriptor)

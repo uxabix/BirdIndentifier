@@ -92,12 +92,12 @@ class CameraService : Service(), LifecycleOwner {
                 FrameBuffer.latestFrame.set(jpeg)
 
                 val manualRec = FrameBuffer.isManualRecording.get()
-                
+
                 if (motionDetected || manualRec) {
                     if (framesRemainingAfterMotion == 0 && !manualRec && FrameBuffer.recordingBuffer.isEmpty()) {
                         Log.d("CameraService", "Motion detected! Starting recording.")
                     }
-                    
+
                     if (motionDetected) {
                         framesRemainingAfterMotion = MOTION_POST_DELAY_FRAMES
                         FrameBuffer.lastMotionTime.set(timestamp)
@@ -112,7 +112,7 @@ class CameraService : Service(), LifecycleOwner {
                 } else if (framesRemainingAfterMotion > 0) {
                     framesRemainingAfterMotion--
                     FrameBuffer.recordingBuffer.add(jpeg to timestamp)
-                    
+
                     if (framesRemainingAfterMotion == 0 && !manualRec) {
                         finalizeRecording()
                     }
@@ -160,7 +160,11 @@ class CameraService : Service(), LifecycleOwner {
     private fun startForegroundNotification() {
         val channelId = "camera_stream"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(channelId, "Camera Streaming", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel(
+                channelId,
+                "Camera Streaming",
+                NotificationManager.IMPORTANCE_LOW
+            )
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
         val notification = NotificationCompat.Builder(this, channelId)

@@ -20,11 +20,12 @@ import androidx.core.content.ContextCompat
 @Composable
 fun CameraControlUI() {
     val context = LocalContext.current
-    val sharedPrefs = context.getSharedPreferences("BirdPrefs", android.content.Context.MODE_PRIVATE)
-    
+    val sharedPrefs =
+        context.getSharedPreferences("BirdPrefs", android.content.Context.MODE_PRIVATE)
+
     // State that reacts to SharedPreferences changes
-    var selectedFolderUri by remember { 
-        mutableStateOf(sharedPrefs.getString("save_folder_uri", null)) 
+    var selectedFolderUri by remember {
+        mutableStateOf(sharedPrefs.getString("save_folder_uri", null))
     }
 
     // Effect to listen for changes from outside (e.g., DeviceServer/Browser)
@@ -44,7 +45,10 @@ fun CameraControlUI() {
         ActivityResultContracts.RequestPermission()
     ) { isGranted: Boolean ->
         if (isGranted) {
-            ContextCompat.startForegroundService(context, Intent(context, CameraService::class.java))
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, CameraService::class.java)
+            )
         }
     }
 
@@ -55,23 +59,26 @@ fun CameraControlUI() {
             val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
                     Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             context.contentResolver.takePersistableUriPermission(it, takeFlags)
-            
+
             sharedPrefs.edit().putString("save_folder_uri", it.toString()).apply()
             selectedFolderUri = it.toString()
         }
     }
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text("Current Storage Location:")
         Text(
-            text = selectedFolderUri?.let { Uri.parse(it).path } ?: "Default (App Internal Storage)",
+            text = selectedFolderUri?.let { Uri.parse(it).path }
+                ?: "Default (App Internal Storage)",
             modifier = Modifier.padding(bottom = 16.dp)
         )
-        
+
         Button(onClick = { folderLauncher.launch(null) }) {
             Text("Change Save Folder (SD Card)")
         }
@@ -81,8 +88,15 @@ fun CameraControlUI() {
         Button(
             modifier = Modifier.fillMaxWidth(0.8f),
             onClick = {
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                    ContextCompat.startForegroundService(context, Intent(context, CameraService::class.java))
+                if (ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.CAMERA
+                    ) == PackageManager.PERMISSION_GRANTED
+                ) {
+                    ContextCompat.startForegroundService(
+                        context,
+                        Intent(context, CameraService::class.java)
+                    )
                 } else {
                     cameraLauncher.launch(Manifest.permission.CAMERA)
                 }

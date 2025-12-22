@@ -22,7 +22,7 @@ class VideoWriter(private val context: Context) {
         val thread = Thread {
             // Run cleanup before saving
             StorageManager.checkAndCleanup(context)
-            
+
             if (!StorageManager.hasEnoughSpace(context)) {
                 Log.e(TAG, "Cannot save video: Not enough free space even after cleanup!")
                 return@Thread
@@ -49,14 +49,20 @@ class VideoWriter(private val context: Context) {
                     val videoFile = pickedDir?.createFile("video/mp4", fileName)
                     if (videoFile != null) {
                         pfd = context.contentResolver.openFileDescriptor(videoFile.uri, "rw")
-                        muxer = MediaMuxer(pfd!!.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                        muxer = MediaMuxer(
+                            pfd!!.fileDescriptor,
+                            MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+                        )
                     }
                 }
 
                 if (muxer == null) {
                     val outputDir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
                     val outputFile = File(outputDir, fileName)
-                    muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                    muxer = MediaMuxer(
+                        outputFile.absolutePath,
+                        MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+                    )
                 }
 
                 val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -64,8 +70,12 @@ class VideoWriter(private val context: Context) {
                 val width = options.outWidth
                 val height = options.outHeight
 
-                val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
-                format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                val format =
+                    MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
+                format.setInteger(
+                    MediaFormat.KEY_COLOR_FORMAT,
+                    MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+                )
                 format.setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
                 format.setInteger(MediaFormat.KEY_FRAME_RATE, configFps)
                 format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
@@ -81,11 +91,12 @@ class VideoWriter(private val context: Context) {
                 for (i in frames.indices) {
                     val startTime = System.currentTimeMillis()
                     if (i > 0) {
-                        val interval = frames[i].second - frames[i-1].second
+                        val interval = frames[i].second - frames[i - 1].second
                         if (interval > 0) Thread.sleep(interval)
                     }
 
-                    val bitmap = BitmapFactory.decodeByteArray(frames[i].first, 0, frames[i].first.size)
+                    val bitmap =
+                        BitmapFactory.decodeByteArray(frames[i].first, 0, frames[i].first.size)
                     if (bitmap != null) {
                         val canvas = inputSurface.lockCanvas(null)
                         canvas.drawBitmap(bitmap, 0f, 0f, null)
@@ -105,13 +116,20 @@ class VideoWriter(private val context: Context) {
                     codec?.stop(); codec?.release()
                     muxer?.stop(); muxer?.release()
                     pfd?.close()
-                } catch (e: Exception) { }
+                } catch (e: Exception) {
+                }
             }
         }
         thread.start()
     }
 
-    private fun drainEncoder(codec: MediaCodec, muxer: MediaMuxer, bufferInfo: MediaCodec.BufferInfo, currentTrackIndex: Int, endOfStream: Boolean = false): Int {
+    private fun drainEncoder(
+        codec: MediaCodec,
+        muxer: MediaMuxer,
+        bufferInfo: MediaCodec.BufferInfo,
+        currentTrackIndex: Int,
+        endOfStream: Boolean = false
+    ): Int {
         var trackIndex = currentTrackIndex
         val timeoutUs = if (endOfStream) 10000L else 0L
         while (true) {
@@ -132,7 +150,9 @@ class VideoWriter(private val context: Context) {
                 if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
             } else if (outBufferIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
                 if (!endOfStream) break
-            } else { break }
+            } else {
+                break
+            }
         }
         return trackIndex
     }
