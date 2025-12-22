@@ -35,12 +35,19 @@ class DeviceServer(
             }
             "/stop-rec" -> {
                 FrameBuffer.isManualRecording.set(false)
-                // The CameraService will handle finalizing in the next frame cycle
                 createHtmlResponse("Recording stopping...")
             }
             "/rec-status" -> newFixedLengthResponse(Response.Status.OK, "text/plain", FrameBuffer.isManualRecording.get().toString())
             "/" -> createHtmlResponse("Camera control")
             else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found")
+        }
+    }
+
+    private fun readAsset(fileName: String): String {
+        return try {
+            context.assets.open(fileName).bufferedReader().use { it.readText() }
+        } catch (e: Exception) {
+            "Error loading template: ${e.message}"
         }
     }
 
@@ -136,39 +143,12 @@ class DeviceServer(
             "<div class='actions'>$impBtn <button class='delete-btn' onclick=\"if(confirm('Delete $name?')) location.href='/delete-video?name=$name'\">🗑️</button></div></li>"
         }
 
-        val html = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Recorded Videos</title>
-                <style>
-                    body { font-family: sans-serif; padding: 20px; background: #f0f0f0; margin: 0; }
-                    .container { max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-                    h2 { color: #333; border-bottom: 2px solid #eee; padding-bottom: 10px; }
-                    ul { list-style: none; padding: 0; }
-                    li { padding: 15px; border-bottom: 1px solid #f0f0f0; display: flex; justify-content: space-between; align-items: center; }
-                    .video-info { display: flex; flex-direction: column; padding-right: 10px; }
-                    .file-size { color:#888; font-size: 0.85em; margin-top: 4px; }
-                    a { text-decoration: none; color: #2196F3; font-weight: bold; word-break: break-all; }
-                    .actions { display: flex; align-items: center; gap: 10px; }
-                    .delete-btn { background: #fff5f5; border: 1px solid #ffcdd2; color: #d32f2f; padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 0.9em; font-weight: bold; }
-                    .imp-btn { background: none; border: 1px solid #ccc; font-size: 1.5em; cursor: pointer; border-radius: 6px; padding: 0 5px; }
-                    .imp-btn.active { color: #FFD700; border-color: #FFD700; }
-                    .back-link { display: inline-block; margin-bottom: 20px; color: #666; font-weight: bold; text-decoration: none; }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <a href="/" class="back-link">← Back to Stream</a>
-                    <h2>Recorded Bird Fragments</h2>
-                    <ul>$listHtml</ul>
-                    ${if (sortedFiles.isEmpty()) "<p style='text-align:center; color:#999;'>No videos recorded yet.</p>" else ""}
-                </div>
-            </body>
-            </html>
-        """.trimIndent()
+        val emptyMsg = if (sortedFiles.isEmpty()) "<p style='text-align:center; color:#999;'>No videos recorded yet.</p>" else ""
+
+        val html = readAsset("videos.html")
+            .replace("{{listHtml}}", listHtml)
+            .replace("{{emptyMessage}}", emptyMsg)
+
         return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", html)
     }
 
@@ -201,121 +181,15 @@ class DeviceServer(
             alertsHtml.append("<div class='alert warning'>⚠️ Warning: Approaching Max Storage Quota. ($usedGb GB used).</div>")
         }
 
-        val html = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Bird Identifier Control</title>
-                <style>
-                    body { font-family: sans-serif; text-align: center; background: #f0f0f0; margin: 0; padding: 20px; }
-                    .container { max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-                    img { width: 100%; border-radius: 10px; border: 2px solid #333; margin-bottom: 20px; }
-                    button { width: 80%; padding: 15px; margin: 10px; font-size: 18px; cursor: pointer; border: none; border-radius: 8px; color: white; transition: opacity 0.2s; }
-                    .btn-play { background-color: #4CAF50; }
-                    .btn-stop { background-color: #f44336; }
-                    .btn-videos { background-color: #2196F3; }
-                    .btn-save { background-color: #2196F3; width: auto; padding: 8px 20px; font-size: 14px; }
-                    .btn-reset { background-color: #607D8B; font-size: 14px; padding: 10px; width: auto; }
-                    .btn-rec-start { background-color: #e53935; }
-                    .btn-rec-stop { background-color: #000000; border: 2px solid #e53935; }
-                    .info-panel { background: #eee; padding: 10px; border-radius: 8px; margin: 10px; font-size: 16px; }
-                    .folder-panel, .storage-settings { background: #e3f2fd; padding: 15px; border-radius: 8px; margin: 10px; font-size: 14px; color: #1565C0; text-align: left; }
-                    .storage-settings h3 { margin-top: 0; }
-                    .storage-settings input { width: 60px; padding: 5px; margin: 5px; }
-                    .alert { padding: 12px; border-radius: 8px; margin: 10px; font-weight: bold; text-align: center; }
-                    .error { background-color: #ffebee; color: #c62828; border: 1px solid #ef9a9a; }
-                    .warning { background-color: #fffde7; color: #f57f17; border: 1px solid #fff59d; }
-                    .storage-info { font-size: 0.9em; color: #555; margin-top: 5px; }
-                    .rec-status { font-weight: bold; padding: 5px; border-radius: 4px; }
-                    .rec-on { color: #e53935; animation: blink 1s infinite; }
-                    #motion-time { font-weight: bold; color: #d32f2f; }
-                    #status { color: #666; font-size: 14px; margin-top: 10px; }
-                    @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
-                </style>
-                <script>
-                    function sendCommand(path) { fetch(path).then(() => { 
-                        document.getElementById('status').innerText = 'Command ' + path + ' was sent';
-                        if(path === '/start-rec' || path === '/stop-rec') setTimeout(updateRecStatus, 500);
-                    }); }
-                    
-                    function updateMotionStatus() {
-                        fetch('/motion-status').then(r => r.text()).then(t => {
-                            if (t === "0") { document.getElementById('motion-time').innerText = "No movement detected"; } else {
-                                const d = new Date(parseInt(t));
-                                document.getElementById('motion-time').innerText = d.toLocaleTimeString() + "." + String(d.getMilliseconds()).padStart(3, '0');
-                            }
-                        });
-                    }
-                    
-                    function updateRecStatus() {
-                        fetch('/rec-status').then(r => r.text()).then(status => {
-                            const btnStart = document.getElementById('btn-rec-start');
-                            const btnStop = document.getElementById('btn-rec-stop');
-                            const indicator = document.getElementById('rec-indicator');
-                            
-                            if (status === 'true') {
-                                btnStart.style.display = 'none';
-                                btnStop.style.display = 'inline-block';
-                                indicator.innerHTML = "<span class='rec-status rec-on'>● RECORDING</span>";
-                            } else {
-                                btnStart.style.display = 'inline-block';
-                                btnStop.style.display = 'none';
-                                indicator.innerHTML = "Standby";
-                            }
-                        });
-                    }
-                    
-                    setInterval(updateMotionStatus, 500);
-                    setInterval(updateRecStatus, 2000);
-                    window.onload = updateRecStatus;
-                </script>
-            </head>
-            <body>
-                <div class="container">
-                    <h2>$status</h2>
-                    
-                    $alertsHtml
+        val html = readAsset("index.html")
+            .replace("{{status}}", status)
+            .replace("{{alertsHtml}}", alertsHtml.toString())
+            .replace("{{folderName}}", folderName)
+            .replace("{{usedGb}}", usedGb)
+            .replace("{{freeGb}}", freeGb)
+            .replace("{{maxTotalSizeGb}}", settings.maxTotalSizeGb.toString())
+            .replace("{{minFreeSpaceGb}}", settings.minFreeSpaceGb.toString())
 
-                    <div id="rec-indicator" style="margin-bottom: 10px; font-weight: bold;">Checking status...</div>
-                    <img src="/mjpeg" alt="Camera Stream">
-                    
-                    <div class="info-panel">Last movement: <span id="motion-time">Loading...</span></div>
-                    
-                    <div style="margin: 15px 0;">
-                        <button id="btn-rec-start" class="btn-rec-start" onclick="sendCommand('/start-rec')">🔴 START MANUAL RECORDING</button>
-                        <button id="id-rec-stop" class="btn-rec-stop" onclick="sendCommand('/stop-rec')" style="display:none;">⏹️ STOP RECORDING</button>
-                    </div>
-
-                    <div class="folder-panel">
-                        Saving to: <strong>$folderName</strong><br>
-                        <div class="storage-info">App usage: $usedGb GB / Max: ${settings.maxTotalSizeGb} GB</div>
-                        <div class="storage-info">Disk Free: $freeGb GB</div>
-                        <button class="btn-reset" onclick="if(confirm('Reset to internal storage?')) location.href='/reset-folder'">Reset to Default</button>
-                    </div>
-
-                    <div class="storage-settings">
-                        <h3>Storage Cleanup Settings</h3>
-                        <form action="/update-storage-settings" method="get">
-                            Max total size (GB): <input type="number" step="0.1" name="max_total" value="${settings.maxTotalSizeGb}"><br>
-                            Min free space (GB): <input type="number" step="0.1" name="min_free" value="${settings.minFreeSpaceGb}"><br>
-                            <button type="submit" class="btn-save">Save Settings</button>
-                        </form>
-                    </div>
-
-                    <button class="btn-play" onclick="sendCommand('/play')">🔊 PLAY</button><br>
-                    <button class="btn-stop" onclick="sendCommand('/stop')">🛑 STOP</button><br>
-                    <button class="btn-videos" onclick="location.href='/videos'">📂 VIEW RECORDINGS</button>
-                    <div id="status">Waiting for commands...</div>
-                </div>
-                <script>
-                   // Fix for dynamic button reference since I used 'id-rec-stop' in the HTML but 'btn-rec-stop' in the JS
-                   document.getElementById('id-rec-stop').id = 'btn-rec-stop';
-                </script>
-            </body>
-            </html>
-        """.trimIndent()
         return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", html)
     }
 

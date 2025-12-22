@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Recorded Videos</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; background: #f0f0f0; margin: 0; }
+        .container { max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h2 { color: #333; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+        ul { list-style: none; padding: 0; }
+        li { padding: 15px; border-bottom: 1px solid #f0f0f0; display: flex; justify-content: space-between; align-items: center; }
+        .video-info { display: flex; flex-direction: column; padding-right: 10px; }
+        .file-size { color:#888; font-size: 0.85em; margin-top: 4px; }
+        a { text-decoration: none; color: #2196F3; font-weight: bold; word-break: break-all; }
+        .actions { display: flex; align-items: center; gap: 10px; }
+        .delete-btn { background: #fff5f5; border: 1px solid #ffcdd2; color: #d32f2f; padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 0.9em; font-weight: bold; }
+        .imp-btn { background: none; border: 1px solid #ccc; font-size: 1.5em; cursor: pointer; border-radius: 6px; padding: 0 5px; }
+        .imp-btn.active { color: #FFD700; border-color: #FFD700; }
+        .back-link { display: inline-block; margin-bottom: 20px; color: #666; font-weight: bold; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="/" class="back-link">← Back to Stream</a>
+        <h2>Recorded Bird Fragments</h2>
+        <ul>{{listHtml}}</ul>
+        {{emptyMessage}}
+    </div>
+</body>
+</html>
