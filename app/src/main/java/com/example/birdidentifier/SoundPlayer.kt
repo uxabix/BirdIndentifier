@@ -2,7 +2,9 @@ package com.example.birdidentifier
 
 import android.content.Context
 import android.media.MediaPlayer
+import android.media.PlaybackParams
 import android.media.audiofx.LoudnessEnhancer
+import android.os.Build
 import kotlin.random.Random
 
 /**
@@ -37,7 +39,8 @@ object SoundPlayer {
     /**
      * Plays a random sound from the predefined [sounds] list.
      * 
-     * Automatically applies a loudness boost and stops any currently 
+     * Automatically applies a loudness boost, randomizes playback speed
+     * within ±20% of the standard rate, and stops any currently 
      * playing sound before starting a new one.
      * 
      * @param context The Android context used to create the [MediaPlayer].
@@ -52,6 +55,18 @@ object SoundPlayer {
             // Apply slight random volume variation for natural feel
             val randomVolume = 1.0f - (Random.nextFloat() * 0.15f)
             mp.setVolume(randomVolume, randomVolume)
+
+            // Randomize playback speed between 0.8x and 1.2x (±20%)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                try {
+                    val randomSpeed = 0.8f + (Random.nextFloat() * 0.4f)
+                    mp.playbackParams = PlaybackParams().apply {
+                        speed = randomSpeed
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
 
             try {
                 // Boost audio session output
