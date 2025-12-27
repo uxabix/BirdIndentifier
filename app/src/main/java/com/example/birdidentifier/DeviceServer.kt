@@ -1,7 +1,10 @@
 package com.example.birdidentifier
 
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Environment
 import androidx.documentfile.provider.DocumentFile
 import fi.iki.elonen.NanoHTTPD
@@ -342,6 +345,23 @@ class DeviceServer(
     }
 
     /**
+     * Retrieves the current battery level and charging status.
+     *
+     * @return A Pair containing the battery level (0-100) and whether it's charging.
+     */
+    private fun getBatteryInfo(): Pair<Int, Boolean> {
+        val batteryIntent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val status = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        
+        val batteryPct = if (level != -1 && scale != -1) (level * 100 / scale.toFloat()).toInt() else -1
+        val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+        
+        return batteryPct to isCharging
+    }
+
+    /**
      * Generates the main control panel HTML by replacing placeholders in the template.
      *
      * @param status The status message to display on the page.
@@ -351,15 +371,23 @@ class DeviceServer(
         val folderName = getCurrentFolderDisplayName()
         val settings = StorageManager.getSettings(context)
         val storageStatus = StorageManager.getStorageStatus(context)
+        val (batteryLevel, isCharging) = getBatteryInfo()
 
         val usedGb = "%.2f".format(storageStatus.totalUsedByAppBytes / (1024.0 * 1024.0 * 1024.0))
         val freeGb = "%.2f".format(storageStatus.freeOnDiskBytes / (1024.0 * 1024.0 * 1024.0))
+        
+        val batteryText = if (batteryLevel != -1) "$batteryLevel%" else "Unknown"
+        val chargingText = if (isCharging) " (Charging)" else ""
 
         val alertsHtml = StringBuilder()
         if (storageStatus.isLowDiskSpace) {
             alertsHtml.append("<div class='alert error'>⚠️ CRITICAL: Low Disk Space! ($freeGb GB left). Recording may stop.</div>")
         } else if (storageStatus.isApproachingMaxQuota) {
             alertsHtml.append("<div class='alert warning'>⚠️ Warning: Approaching Max Storage Quota. ($usedGb GB used).</div>")
+        }
+        
+        if (batteryLevel != -1 && batteryLevel < 25 && !isCharging) {
+            alertsHtml.append("<div class='alert warning'>⚠️ Warning: Low Battery ($batteryLevel%). Please connect a charger.</div>")
         }
 
         val html = readAsset("index.html")
@@ -368,6 +396,7 @@ class DeviceServer(
             .replace("{{folderName}}", folderName)
             .replace("{{usedGb}}", usedGb)
             .replace("{{freeGb}}", freeGb)
+            .replace("{{batteryStatus}}", "$batteryText$chargingText")
             .replace("{{maxTotalSizeGb}}", settings.maxTotalSizeGb.toString())
             .replace("{{minFreeSpaceGb}}", settings.minFreeSpaceGb.toString())
             .replace("{{ROUTE_START_REC}}", ROUTE_START_REC)
