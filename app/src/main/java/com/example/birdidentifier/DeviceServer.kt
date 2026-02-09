@@ -6,13 +6,17 @@ import android.content.IntentFilter
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Environment
+import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.concurrent.atomic.AtomicReference
+import org.json.JSONObject
 
 /**
  * A local HTTP server that provides a web interface for camera control,
@@ -35,6 +39,7 @@ class DeviceServer(
      * Constants representing the various HTTP routes supported by the server.
      */
     companion object {
+        private const val TAG = "DeviceServer"
         /** Root path serving the main control panel. */
         const val ROUTE_ROOT = "/"
         /** Path for the MJPEG video stream. */
@@ -43,6 +48,10 @@ class DeviceServer(
         const val ROUTE_PLAY = "/play"
         /** Command to stop the currently playing sound. */
         const val ROUTE_STOP = "/stop"
+        /** Command to play a random sound on the external server. */
+        const val ROUTE_EXTERNAL_PLAY_RANDOM = "/external-play-random"
+        /** Command to stop playback on the external server. */
+        const val ROUTE_EXTERNAL_STOP = "/external-stop"
         /** Returns the timestamp of the last detected motion. */
         const val ROUTE_MOTION_STATUS = "/motion-status"
         /** Path for the recorded videos list page. */
@@ -63,6 +72,13 @@ class DeviceServer(
         const val ROUTE_STOP_REC = "/stop-rec"
         /** Returns the current manual recording status. */
         const val ROUTE_REC_STATUS = "/rec-status"
+        /** Updates the external audio server IP address. */
+        const val ROUTE_UPDATE_SERVER_IP = "/update-server-ip"
+        /** Returns the status of the external audio server. */
+        const val ROUTE_SERVER_STATUS = "/server-status"
+
+        private const val PREFS_NAME = "BirdPrefs"
+        private const val KEY_EXTERNAL_SERVER_IP = "external_server_ip"
     }
 
     /**
@@ -72,22 +88,39 @@ class DeviceServer(
      * @return A [Response] object representing the result of the request.
      */
     override fun serve(session: IHTTPSession): Response {
+        Log.d(TAG, "Received request: ${session.method} ${session.uri} with params ${session.parameters}")
+        // Get status message from query parameters for redirection handling
+        val statusMessage = session.parameters["status"]?.firstOrNull()?.replace("+", " ") ?: ""
+
         return when (session.uri) {
-            ROUTE_MJPEG -> newChunkedResponse(
-                Response.Status.OK,
-                "multipart/x-mixed-replace; boundary=--frame",
-                MjpegInputStream()
-            )
+            ROUTE_MJPEG -> {
+                Log.d(TAG, "Serving MJPEG stream.")
+                newChunkedResponse(
+                    Response.Status.OK,
+                    "multipart/x-mixed-replace; boundary=--frame",
+                    MjpegInputStream()
+                )
+            }
 
             ROUTE_PLAY -> {
-                SoundPlayer.play(context)
-                createHtmlResponse("Sound played")
+                try {
+                    Log.d(TAG, "Executing PLAY command on device.")
+                    SoundPlayer.play(context)
+                    redirectResponse("Sound played on device")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error executing PLAY command", e)
+                    newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "Error playing sound: ${e.message}")
+                }
             }
 
             ROUTE_STOP -> {
+                Log.d(TAG, "Executing STOP command on device.")
                 SoundPlayer.stop()
-                createHtmlResponse("Sound stopped")
+                redirectResponse("Sound stopped on device")
             }
+
+            ROUTE_EXTERNAL_PLAY_RANDOM -> sendCommandToExternalServer("/play_random")
+            ROUTE_EXTERNAL_STOP -> sendCommandToExternalServer("/stop")
 
             ROUTE_MOTION_STATUS -> newFixedLengthResponse(
                 Response.Status.OK,
@@ -106,13 +139,15 @@ class DeviceServer(
             ROUTE_UPDATE_SETTINGS -> updateStorageSettings(session.parameters)
             ROUTE_RESET_FOLDER -> resetFolder()
             ROUTE_START_REC -> {
+                Log.d(TAG, "Starting manual recording.")
                 FrameBuffer.isManualRecording.set(true)
-                createHtmlResponse("Recording started")
+                redirectResponse("Recording started")
             }
 
             ROUTE_STOP_REC -> {
+                Log.d(TAG, "Stopping manual recording.")
                 FrameBuffer.isManualRecording.set(false)
-                createHtmlResponse("Recording stopping...")
+                redirectResponse("Recording stopping...")
             }
 
             ROUTE_REC_STATUS -> newFixedLengthResponse(
@@ -121,8 +156,25 @@ class DeviceServer(
                 FrameBuffer.isManualRecording.get().toString()
             )
 
-            ROUTE_ROOT -> createHtmlResponse("Camera control")
-            else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found")
+            ROUTE_UPDATE_SERVER_IP -> updateServerIp(session.parameters["ip"]?.firstOrNull())
+            ROUTE_SERVER_STATUS -> getServerStatusResponse()
+
+            ROUTE_ROOT -> createHtmlResponse(statusMessage)
+            else -> {
+                Log.w(TAG, "Not found: ${session.uri}")
+                newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found")
+            }
+        }
+    }
+
+    /**
+     * Helper to create a redirect response to the root page with a status message.
+     * @param message The status message to display on the redirected page.
+     */
+    private fun redirectResponse(message: String): Response {
+        val encodedMessage = Uri.encode(message)
+        return newFixedLengthResponse(Response.Status.REDIRECT, "text/plain", "").apply {
+            addHeader("Location", "$ROUTE_ROOT?status=$encodedMessage")
         }
     }
 
@@ -136,27 +188,74 @@ class DeviceServer(
         return try {
             context.assets.open(fileName).bufferedReader().use { it.readText() }
         } catch (e: Exception) {
+            Log.e(TAG, "Error loading asset: $fileName", e)
             "Error loading template: ${e.message}"
+        }
+    }
+
+    /**
+     * Sends a simple GET command to the configured external server.
+     *
+     * @param command The API path to trigger (e.g., "/play_random").
+     * @return An HTML response indicating the action's outcome.
+     */
+    private fun sendCommandToExternalServer(command: String): Response {
+        val serverIp = getSavedServerIp()
+        if (serverIp.isBlank()) {
+            val errorMsg = "Error: External server IP not set."
+            Log.w(TAG, "Cannot send command '$command': $errorMsg")
+            return newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", errorMsg)
+        }
+
+        var connection: HttpURLConnection? = null
+        try {
+            val url = URL("http://$serverIp$command")
+            Log.d(TAG, "Sending command to external server: $url")
+            connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 3000
+            connection.readTimeout = 3000
+
+            val responseCode = connection.responseCode
+            val responseMessage = connection.responseMessage
+
+            if (responseCode == HttpURLConnection.HTTP_OK) {
+                val message = "Command '$command' sent to external server successfully."
+                Log.d(TAG, message)
+                return redirectResponse(message)
+            } else {
+                val errorMsg = "Error sending command '$command': Server returned code $responseCode - $responseMessage"
+                Log.e(TAG, errorMsg)
+                return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", errorMsg)
+            }
+        } catch (e: Exception) {
+            val errorMsg = "Error sending command '$command': ${e.message}"
+            Log.e(TAG, errorMsg, e)
+            return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", errorMsg)
+        } finally {
+            connection?.disconnect()
         }
     }
 
     /**
      * Marks a video as important or unimportant using [StorageManager].
      *
-     * @param name The name of the video file.
+     * @param name The name of the file.
      * @param important Whether the video should be marked as important.
      * @return A redirect response to the videos list.
      */
     private fun markImportant(name: String?, important: Boolean): Response {
-        if (name == null) return newFixedLengthResponse(
-            Response.Status.BAD_REQUEST,
-            "text/plain",
-            "Missing name"
-        )
-        StorageManager.markImportant(context, name, important)
-        return newFixedLengthResponse(Response.Status.REDIRECT, "text/plain", "").apply {
-            addHeader("Location", ROUTE_VIDEOS_LIST)
+        if (name == null) {
+            Log.w(TAG, "markImportant failed: Missing file name.")
+            return newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Missing name")
         }
+        Log.d(TAG, "Marking file '$name' as important=$important")
+        if (StorageManager.markImportant(context, name, important)) {
+            Log.d(TAG, "File '$name' marked successfully.")
+        } else {
+            Log.e(TAG, "Failed to mark file '$name'.")
+        }
+        return redirectResponse("Video '$name' importance updated.")
     }
 
     /**
@@ -168,10 +267,9 @@ class DeviceServer(
     private fun updateStorageSettings(params: Map<String, List<String>>): Response {
         val maxTotal = params["max_total"]?.firstOrNull()?.toFloatOrNull() ?: 5.0f
         val minFree = params["min_free"]?.firstOrNull()?.toFloatOrNull() ?: 1.0f
+        Log.d(TAG, "Updating storage settings: maxTotal=${maxTotal}GB, minFree=${minFree}GB")
         StorageManager.saveSettings(context, maxTotal, minFree)
-        return newFixedLengthResponse(Response.Status.REDIRECT, "text/plain", "").apply {
-            addHeader("Location", ROUTE_ROOT)
-        }
+        return redirectResponse("Storage settings updated.")
     }
 
     /**
@@ -180,11 +278,10 @@ class DeviceServer(
      * @return A redirect response to the root page.
      */
     private fun resetFolder(): Response {
-        val sharedPrefs = context.getSharedPreferences("BirdPrefs", Context.MODE_PRIVATE)
+        Log.d(TAG, "Resetting video storage folder to default.")
+        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         sharedPrefs.edit().remove("save_folder_uri").apply()
-        return newFixedLengthResponse(Response.Status.REDIRECT, "text/plain", "").apply {
-            addHeader("Location", ROUTE_ROOT)
-        }
+        return redirectResponse("Storage folder reset to default.")
     }
 
     /**
@@ -193,13 +290,12 @@ class DeviceServer(
      * @return The name of the folder or a default description.
      */
     private fun getCurrentFolderDisplayName(): String {
-        val sharedPrefs = context.getSharedPreferences("BirdPrefs", Context.MODE_PRIVATE)
+        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val uriStr =
             sharedPrefs.getString("save_folder_uri", null) ?: return "Default (Internal Movies)"
         return try {
             val treeUri = Uri.parse(uriStr)
-            val pickedDir = DocumentFile.fromTreeUri(context, treeUri)
-            pickedDir?.name ?: "Custom SD/Folder"
+            DocumentFile.fromTreeUri(context, treeUri)?.name ?: "Custom SD/Folder"
         } catch (e: Exception) {
             "Custom Folder"
         }
@@ -213,19 +309,30 @@ class DeviceServer(
      * @return Either a [DocumentFile] or a [File] object, or null if not found.
      */
     private fun getFileFromAnywhere(fileName: String): Any? {
-        val sharedPrefs = context.getSharedPreferences("BirdPrefs", Context.MODE_PRIVATE)
+        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val folderUriString = sharedPrefs.getString("save_folder_uri", null)
 
         if (folderUriString != null) {
-            val treeUri = Uri.parse(folderUriString)
-            val pickedDir = DocumentFile.fromTreeUri(context, treeUri)
-            val safFile = pickedDir?.findFile(fileName)
-            if (safFile != null && safFile.exists()) return safFile
+             try {
+                val treeUri = Uri.parse(folderUriString)
+                val pickedDir = DocumentFile.fromTreeUri(context, treeUri)
+                val safFile = pickedDir?.findFile(fileName)
+                if (safFile != null && safFile.exists()) {
+                    Log.d(TAG, "Found file '$fileName' in SAF folder.")
+                    return safFile
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error accessing SAF folder: $folderUriString", e)
+            }
         }
 
         val internalFile = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), fileName)
-        if (internalFile.exists()) return internalFile
+        if (internalFile.exists()) {
+            Log.d(TAG, "Found file '$fileName' in internal storage.")
+            return internalFile
+        }
 
+        Log.w(TAG, "File '$fileName' not found in any storage location.")
         return null
     }
 
@@ -236,11 +343,11 @@ class DeviceServer(
      * @return A redirect response to the videos list or an error response.
      */
     private fun deleteVideo(fileName: String?): Response {
-        if (fileName == null) return newFixedLengthResponse(
-            Response.Status.BAD_REQUEST,
-            "text/plain",
-            "Missing name"
-        )
+        if (fileName == null) {
+            Log.w(TAG, "deleteVideo failed: Missing file name.")
+            return newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Missing name")
+        }
+        Log.d(TAG, "Attempting to delete file: $fileName")
         val fileObj = getFileFromAnywhere(fileName)
 
         val deleted = when (fileObj) {
@@ -249,19 +356,13 @@ class DeviceServer(
             else -> false
         }
 
-        return if (deleted) {
-            newFixedLengthResponse(
-                Response.Status.REDIRECT,
-                "text/plain",
-                ""
-            ).apply { addHeader("Location", ROUTE_VIDEOS_LIST) }
+        if(deleted) {
+            Log.d(TAG, "Successfully deleted file: $fileName")
         } else {
-            newFixedLengthResponse(
-                Response.Status.INTERNAL_ERROR,
-                "text/plain",
-                "Could not delete file"
-            )
+            Log.e(TAG, "Failed to delete file: $fileName")
         }
+
+        return redirectResponse("Video '$fileName' deleted.")
     }
 
     /**
@@ -270,24 +371,36 @@ class DeviceServer(
      * @return An HTML response with the list of videos.
      */
     private fun listVideos(): Response {
+        Log.d(TAG, "Listing video files.")
         val allFiles = mutableListOf<Triple<String, Long, Boolean>>()
+
+        // List from internal storage
         val internalDir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-        internalDir?.listFiles { f -> f.extension.lowercase() == "mp4" }?.forEach {
-            allFiles.add(Triple(it.name, it.length(), StorageManager.isImportant(it.name)))
+        var internalFileCount = 0
+        try {
+            internalDir?.listFiles { f -> f.extension.lowercase() == "mp4" }?.forEach {
+                allFiles.add(Triple(it.name, it.length(), StorageManager.isImportant(it.name)))
+                internalFileCount++
+            }
+            Log.d(TAG, "Found $internalFileCount files in internal storage.")
+        } catch(e: Exception) {
+            Log.e(TAG, "Failed to list files in internal storage", e)
         }
 
-        val sharedPrefs = context.getSharedPreferences("BirdPrefs", Context.MODE_PRIVATE)
+        // List from SAF storage
+        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        var safFileCount = 0
         sharedPrefs.getString("save_folder_uri", null)?.let { uriStr ->
-            DocumentFile.fromTreeUri(context, Uri.parse(uriStr))?.listFiles()?.forEach {
-                if (it.name?.lowercase()?.endsWith(".mp4") == true) {
-                    allFiles.add(
-                        Triple(
-                            it.name!!,
-                            it.length(),
-                            StorageManager.isImportant(it.name!!)
-                        )
-                    )
+            try {
+                DocumentFile.fromTreeUri(context, Uri.parse(uriStr))?.listFiles()?.forEach { file ->
+                    if (file.name?.lowercase()?.endsWith(".mp4") == true) {
+                        allFiles.add(Triple(file.name!!, file.length(), StorageManager.isImportant(file.name!!)))
+                        safFileCount++
+                    }
                 }
+                Log.d(TAG, "Found $safFileCount files in SAF folder.")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to list files in SAF folder $uriStr", e)
             }
         }
 
@@ -320,11 +433,11 @@ class DeviceServer(
      * @return A response with the video stream or an error message.
      */
     private fun serveVideo(fileName: String?): Response {
-        if (fileName == null) return newFixedLengthResponse(
-            Response.Status.BAD_REQUEST,
-            "text/plain",
-            "Missing name"
-        )
+        if (fileName == null) {
+            Log.w(TAG, "serveVideo failed: Missing file name.")
+            return newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Missing name")
+        }
+        Log.d(TAG, "Attempting to serve video: $fileName")
         val fileObj = getFileFromAnywhere(fileName)
         return try {
             val (inputStream, length) = when (fileObj) {
@@ -332,14 +445,15 @@ class DeviceServer(
                 is File -> FileInputStream(fileObj) to fileObj.length()
                 else -> null to 0L
             }
-            if (inputStream != null) newFixedLengthResponse(
-                Response.Status.OK,
-                "video/mp4",
-                inputStream,
-                length
-            )
-            else newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "File not found")
+            if (inputStream != null) {
+                Log.d(TAG, "Serving '$fileName' with length $length")
+                newFixedLengthResponse(Response.Status.OK, "video/mp4", inputStream, length)
+            } else {
+                Log.w(TAG, "serveVideo failed: File not found after search: $fileName")
+                newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "File not found")
+            }
         } catch (e: Exception) {
+            Log.e(TAG, "Error serving video '$fileName'", e)
             newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", e.message)
         }
     }
@@ -354,12 +468,117 @@ class DeviceServer(
         val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
         val status = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
-        
+
         val batteryPct = if (level != -1 && scale != -1) (level * 100 / scale.toFloat()).toInt() else -1
         val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
-        
+
         return batteryPct to isCharging
     }
+
+    /**
+     * Saves the external server IP address to SharedPreferences.
+     *
+     * @param ip The IP address to save.
+     * @return A response indicating success or failure.
+     */
+    private fun updateServerIp(ip: String?): Response {
+        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (!ip.isNullOrBlank()) {
+            var cleanIp = ip.trim().removePrefix("http://").removePrefix("https://")
+            while (cleanIp.endsWith("/")) cleanIp = cleanIp.dropLast(1)
+            Log.d(TAG, "Updating external server IP to '$cleanIp' (original: '$ip')")
+            sharedPrefs.edit().putString(KEY_EXTERNAL_SERVER_IP, cleanIp).apply()
+            return redirectResponse("External server IP saved: $cleanIp")
+        }
+        Log.w(TAG, "updateServerIp failed: Invalid or blank IP provided.")
+        return redirectResponse("Error: Invalid external server IP address provided.")
+    }
+
+    /**
+     * Retrieves the saved external server IP address from SharedPreferences.
+     *
+     * @return The saved IP address or an empty string if not found.
+     */
+    private fun getSavedServerIp(): String {
+        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return sharedPrefs.getString(KEY_EXTERNAL_SERVER_IP, "") ?: ""
+    }
+
+    /**
+     * Retrieves the status of the external audio server (online, battery, sleep schedule).
+     *
+     * @return A JSON response with the server status.
+     */
+    private fun getServerStatusResponse(): Response {
+        val serverIp = getSavedServerIp()
+        if (serverIp.isBlank()) {
+            Log.d(TAG, "getServerStatusResponse: External server IP not configured.")
+            return newFixedLengthResponse(Response.Status.OK, "application/json", "{ \"isOnline\": false, \"message\": \"Server IP not configured\" }")
+        }
+
+        var isOnline = false
+        var batteryData: JSONObject? = null
+        var sleepSchedule: JSONObject? = null
+        var errorMessage: String? = null
+
+        try {
+            val pingUrl = URL("http://$serverIp/ping")
+            Log.d(TAG, "Pinging external server at: $pingUrl")
+            (pingUrl.openConnection() as? HttpURLConnection)?.run{
+                requestMethod = "GET"
+                connectTimeout = 2000
+                readTimeout = 2000
+                if (responseCode == HttpURLConnection.HTTP_OK) {
+                    isOnline = true
+                    Log.d(TAG, "Ping successful.")
+                } else {
+                    Log.w(TAG, "Ping failed with code: $responseCode. Message: ${responseMessage}")
+                }
+                disconnect()
+            }
+
+            if (isOnline) {
+                val batteryUrl = URL("http://$serverIp/battery")
+                Log.d(TAG, "Fetching battery status from $batteryUrl")
+                (batteryUrl.openConnection() as? HttpURLConnection)?.run {
+                    connectTimeout = 2000
+                    if (responseCode == HttpURLConnection.HTTP_OK) {
+                         batteryData = JSONObject(inputStream.bufferedReader().use { it.readText() })
+                         Log.d(TAG, "Battery data: $batteryData")
+                    } else {
+                        Log.w(TAG, "Failed to fetch battery data with code: $responseCode")
+                    }
+                    disconnect()
+                }
+
+                val sleepUrl = URL("http://$serverIp/sleep")
+                Log.d(TAG, "Fetching sleep status from $sleepUrl")
+                (sleepUrl.openConnection() as? HttpURLConnection)?.run {
+                    connectTimeout = 2000
+                    if (responseCode == HttpURLConnection.HTTP_OK) {
+                        sleepSchedule = JSONObject(inputStream.bufferedReader().use { it.readText() })
+                        Log.d(TAG, "Sleep schedule data: $sleepSchedule")
+                    } else {
+                        Log.w(TAG, "Failed to fetch sleep data with code: $responseCode")
+                    }
+                    disconnect()
+                }
+            }
+        } catch (e: Exception) {
+            errorMessage = e.toString()
+            Log.e(TAG, "Error checking server status: $errorMessage")
+        }
+
+        val jsonResponse = JSONObject().apply {
+            put("isOnline", isOnline)
+            if (batteryData != null) put("battery", batteryData)
+            if (sleepSchedule != null) put("sleep", sleepSchedule)
+            if (errorMessage != null) put("error", errorMessage)
+        }.toString()
+        Log.d(TAG, "Server status response: $jsonResponse")
+        return newFixedLengthResponse(Response.Status.OK, "application/json", jsonResponse)
+    }
+
 
     /**
      * Generates the main control panel HTML by replacing placeholders in the template.
@@ -368,14 +587,16 @@ class DeviceServer(
      * @return An HTML response for the main interface.
      */
     private fun createHtmlResponse(status: String): Response {
+        Log.d(TAG, "createHtmlResponse: Starting with status='$status'")
         val folderName = getCurrentFolderDisplayName()
         val settings = StorageManager.getSettings(context)
         val storageStatus = StorageManager.getStorageStatus(context)
         val (batteryLevel, isCharging) = getBatteryInfo()
+        val externalServerIp = getSavedServerIp()
 
         val usedGb = "%.2f".format(storageStatus.totalUsedByAppBytes / (1024.0 * 1024.0 * 1024.0))
         val freeGb = "%.2f".format(storageStatus.freeOnDiskBytes / (1024.0 * 1024.0 * 1024.0))
-        
+
         val batteryText = if (batteryLevel != -1) "$batteryLevel%" else "Unknown"
         val chargingText = if (isCharging) " (Charging)" else ""
 
@@ -385,13 +606,13 @@ class DeviceServer(
         } else if (storageStatus.isApproachingMaxQuota) {
             alertsHtml.append("<div class='alert warning'>⚠️ Warning: Approaching Max Storage Quota. ($usedGb GB used).</div>")
         }
-        
+
         if (batteryLevel != -1 && batteryLevel < 25 && !isCharging) {
             alertsHtml.append("<div class='alert warning'>⚠️ Warning: Low Battery ($batteryLevel%). Please connect a charger.</div>")
         }
 
         val html = readAsset("index.html")
-            .replace("{{status}}", status)
+            .replace("{{status}}", status) // Use the passed status message here
             .replace("{{alertsHtml}}", alertsHtml.toString())
             .replace("{{folderName}}", folderName)
             .replace("{{usedGb}}", usedGb)
@@ -409,7 +630,13 @@ class DeviceServer(
             .replace("{{ROUTE_PLAY}}", ROUTE_PLAY)
             .replace("{{ROUTE_STOP}}", ROUTE_STOP)
             .replace("{{ROUTE_VIDEOS_LIST}}", ROUTE_VIDEOS_LIST)
+            .replace("{{ROUTE_UPDATE_SERVER_IP}}", ROUTE_UPDATE_SERVER_IP)
+            .replace("{{ROUTE_SERVER_STATUS}}", ROUTE_SERVER_STATUS)
+            .replace("{{EXTERNAL_SERVER_IP}}", externalServerIp)
+            .replace("{{ROUTE_EXTERNAL_PLAY_RANDOM}}", ROUTE_EXTERNAL_PLAY_RANDOM)
+            .replace("{{ROUTE_EXTERNAL_STOP}}", ROUTE_EXTERNAL_STOP)
 
+        Log.d(TAG, "createHtmlResponse: Finished creating HTML response.")
         return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", html)
     }
 

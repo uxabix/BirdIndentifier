@@ -5,6 +5,7 @@ import android.media.MediaPlayer
 import android.media.PlaybackParams
 import android.media.audiofx.LoudnessEnhancer
 import android.os.Build
+import android.util.Log
 import kotlin.random.Random
 
 /**
@@ -14,6 +15,7 @@ import kotlin.random.Random
  * audio output levels significantly.
  */
 object SoundPlayer {
+    private const val TAG = "SoundPlayer"
     private var mediaPlayer: MediaPlayer? = null
     private var loudnessEnhancer: LoudnessEnhancer? = null
     
@@ -38,50 +40,76 @@ object SoundPlayer {
 
     /**
      * Plays a random sound from the predefined [sounds] list.
-     * 
+     *
      * Automatically applies a loudness boost, randomizes playback speed
-     * within ±20% of the standard rate, and stops any currently 
+     * within ±20% of the standard rate, and stops any currently
      * playing sound before starting a new one.
-     * 
+     *
      * @param context The Android context used to create the [MediaPlayer].
+     * @throws IllegalStateException if the MediaPlayer cannot be created.
      */
+    @Synchronized
     fun play(context: Context) {
+        Log.d(TAG, "Play command received.")
         stop()
 
         val randomSound = sounds.random()
-        mediaPlayer = MediaPlayer.create(context, randomSound)
+        Log.d(TAG, "Attempting to create MediaPlayer for sound resource ID: $randomSound")
+        
+        mediaPlayer = try {
+            MediaPlayer.create(context, randomSound)
+        } catch (e: Exception) {
+            Log.e(TAG, "MediaPlayer.create() threw an exception for resource ID $randomSound", e)
+            throw IllegalStateException("Failed to load sound resource: ${e.message}", e)
+        }
+
+        if (mediaPlayer == null) {
+            val errorMsg = "MediaPlayer.create() returned null for resource ID $randomSound. The file may be missing, corrupt, or in an unsupported format."
+            Log.e(TAG, errorMsg)
+            throw IllegalStateException(errorMsg)
+        }
 
         mediaPlayer?.let { mp ->
-            // Apply slight random volume variation for natural feel
+            Log.d(TAG, "MediaPlayer created successfully. Audio session ID: ${mp.audioSessionId}")
             val randomVolume = 1.0f - (Random.nextFloat() * 0.15f)
             mp.setVolume(randomVolume, randomVolume)
 
-            // Randomize playback speed between 0.8x and 1.2x (±20%)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 try {
                     val randomSpeed = 0.8f + (Random.nextFloat() * 0.4f)
-                    mp.playbackParams = PlaybackParams().apply {
-                        speed = randomSpeed
-                    }
+                    mp.playbackParams = PlaybackParams().apply { speed = randomSpeed }
+                    Log.d(TAG, "Playback speed set to ${randomSpeed}x")
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    Log.e(TAG, "Failed to set playback speed", e)
                 }
             }
 
+            // Temporarily disable LoudnessEnhancer for debugging as it can cause issues on some devices.
+            /*
             try {
-                // Boost audio session output
                 loudnessEnhancer = LoudnessEnhancer(mp.audioSessionId).apply {
                     setTargetGain(BOOST_GAIN)
                     enabled = true
                 }
+                Log.d(TAG, "LoudnessEnhancer enabled with ${BOOST_GAIN}mB gain.")
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e(TAG, "LoudnessEnhancer initialization failed", e)
             }
+            */
 
             mp.setOnCompletionListener {
+                Log.d(TAG, "Playback completed.")
                 stop()
             }
+
+            mp.setOnErrorListener { _, what, extra ->
+                Log.e(TAG, "MediaPlayer internal error. What: $what, Extra: $extra")
+                stop() // Stop and release resources on error
+                true // Returning true indicates the error was handled
+            }
+
             mp.start()
+            Log.d(TAG, "Playback started.")
         }
     }
 
@@ -89,18 +117,31 @@ object SoundPlayer {
      * Stops the current playback and releases both [MediaPlayer] 
      * and [LoudnessEnhancer] resources.
      */
+    @Synchronized
     fun stop() {
+        if (mediaPlayer == null && loudnessEnhancer == null) {
+            return // Nothing to do
+        }
+        Log.d(TAG, "Stop command received.")
         try {
-            loudnessEnhancer?.enabled = false
-            loudnessEnhancer?.release()
+            loudnessEnhancer?.let {
+                it.enabled = false
+                it.release()
+                Log.d(TAG, "LoudnessEnhancer released.")
+            }
             loudnessEnhancer = null
 
-            if (mediaPlayer?.isPlaying == true) {
-                mediaPlayer?.stop()
+            mediaPlayer?.let{
+                if (it.isPlaying) {
+                    it.stop()
+                    Log.d(TAG, "MediaPlayer stopped.")
+                }
+                it.release()
+                Log.d(TAG, "MediaPlayer released.")
             }
-            mediaPlayer?.release()
             mediaPlayer = null
         } catch (e: Exception) {
+            Log.e(TAG, "Exception during stop()", e)
             mediaPlayer = null
             loudnessEnhancer = null
         }

@@ -41,6 +41,9 @@ class CameraService : Service(), LifecycleOwner {
     
     /** Countdown of frames to continue recording after the last motion event was detected. */
     private var framesRemainingAfterMotion = 0
+
+    /** Tracks the previous state of manual recording to detect when it stops. */
+    private var wasManualRecording = false
     
     /** Post-delay duration after motion: 2 minutes assuming 30 FPS. */
     private val MOTION_POST_DELAY_FRAMES = 30 * 60 * 2
@@ -133,6 +136,13 @@ class CameraService : Service(), LifecycleOwner {
 
                 val manualRec = FrameBuffer.isManualRecording.get()
 
+                // Check for stop-recording transition
+                if (wasManualRecording && !manualRec) {
+                    Log.d("CameraService", "Manual recording stopped. Finalizing.")
+                    finalizeRecording()
+                }
+                wasManualRecording = manualRec
+
                 if (motionDetected || manualRec) {
                     if (framesRemainingAfterMotion == 0 && !manualRec && FrameBuffer.recordingBuffer.isEmpty()) {
                         Log.d("CameraService", "Motion detected! Starting recording.")
@@ -181,7 +191,8 @@ class CameraService : Service(), LifecycleOwner {
         val framesToSave = FrameBuffer.recordingBuffer.toList()
         FrameBuffer.recordingBuffer.clear()
         framesRemainingAfterMotion = 0
-        FrameBuffer.isManualRecording.set(false)
+        // We don't set manualRec to false here because it might have already been set to false
+        // by the user, which is what triggered this call.
         videoWriter.saveVideoWithTimestamps(framesToSave)
     }
 

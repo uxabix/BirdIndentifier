@@ -17,12 +17,14 @@
         .btn-rec-start { background-color: #e53935; }
         .btn-rec-stop { background-color: #000000; border: 2px solid #e53935; }
         .info-panel { background: #eee; padding: 10px; border-radius: 8px; margin: 10px; font-size: 16px; }
-        .folder-panel, .storage-settings { background: #e3f2fd; padding: 15px; border-radius: 8px; margin: 10px; font-size: 14px; color: #1565C0; text-align: left; }
-        .storage-settings h3 { margin-top: 0; }
-        .storage-settings input { width: 60px; padding: 5px; margin: 5px; }
+        .folder-panel, .storage-settings, .audio-server-settings { background: #e3f2fd; padding: 15px; border-radius: 8px; margin: 10px; font-size: 14px; color: #1565C0; text-align: left; }
+        .storage-settings h3, .audio-server-settings h3 { margin-top: 0; }
+        .storage-settings input, .audio-server-settings input { width: 60px; padding: 5px; margin: 5px; }
+        .audio-server-settings input[type="text"] { width: 250px; }
         .alert { padding: 12px; border-radius: 8px; margin: 10px; font-weight: bold; text-align: center; }
         .error { background-color: #ffebee; color: #c62828; border: 1px solid #ef9a9a; }
         .warning { background-color: #fffde7; color: #f57f17; border: 1px solid #fff59d; }
+        .success { background-color: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; }
         .storage-info { font-size: 0.9em; color: #555; margin-top: 5px; }
         .rec-status { font-weight: bold; padding: 5px; border-radius: 4px; }
         .rec-on { color: #e53935; animation: blink 1s infinite; }
@@ -32,11 +34,32 @@
         @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
     </style>
     <script>
-        function sendCommand(path) { fetch(path).then(() => { 
-            document.getElementById('status').innerText = 'Command ' + path + ' was sent';
-            if(path === '{{ROUTE_START_REC}}' || path === '{{ROUTE_STOP_REC}}') setTimeout(updateRecStatus, 500);
-        }); }
-        
+        function sendCommand(path) {
+            document.getElementById('status').innerText = 'Sending ' + path + '...';
+            fetch(path)
+                .then(response => {
+                    // For most commands, the server redirects, and the browser reloads the page
+                    // with the status message in the header. We'll check for non-OK responses
+                    // that were not redirects, which would indicate an unexpected error.
+                    if (!response.ok && !response.redirected) {
+                        return response.text().then(text => { 
+                            throw new Error(text || 'Request failed with status ${response.status}');
+                        });
+                    }
+                    // This message is for immediate feedback before the page reloads on redirect.
+                    document.getElementById('status').innerText = 'Command ' + path + ' sent successfully.';
+                })
+                .catch(error => {
+                    console.error('sendCommand error:', error);
+                    document.getElementById('status').innerText = 'Error: ' + error.message;
+                });
+            
+            // For REC commands, schedule a UI update shortly after sending the command.
+            if(path === '{{ROUTE_START_REC}}' || path === '{{ROUTE_STOP_REC}}') {
+                setTimeout(updateRecStatus, 500);
+            }
+        }
+
         function updateMotionStatus() {
             fetch('{{ROUTE_MOTION_STATUS}}').then(r => r.text()).then(t => {
                 if (t === "0") { document.getElementById('motion-time').innerText = "No movement detected"; } else {
@@ -45,13 +68,13 @@
                 }
             });
         }
-        
+
         function updateRecStatus() {
             fetch('{{ROUTE_REC_STATUS}}').then(r => r.text()).then(status => {
                 const btnStart = document.getElementById('btn-rec-start');
                 const btnStop = document.getElementById('btn-rec-stop');
                 const indicator = document.getElementById('rec-indicator');
-                
+
                 if (status === 'true') {
                     btnStart.style.display = 'none';
                     btnStop.style.display = 'inline-block';
@@ -63,26 +86,75 @@
                 }
             });
         }
-        
+
+        function saveServerIp() {
+            const ip = document.getElementById('serverIpInput').value;
+            fetch('{{ROUTE_UPDATE_SERVER_IP}}?ip=' + encodeURIComponent(ip)).then(r => r.text()).then(response => {
+                document.getElementById('status').innerText = response;
+                // Force immediate refresh of IP in UI
+                updateServerStatus();
+            });
+        }
+
+        function formatTime(timeStr) {
+            if (!timeStr) return "00:00";
+            const parts = timeStr.split(':');
+            if (parts.length === 2) {
+                return parts[0].padStart(2, '0') + ':' + parts[1].padStart(2, '0');
+            }
+            return timeStr;
+        }
+
+        function updateServerStatus() {
+            fetch('{{ROUTE_SERVER_STATUS}}').then(r => r.json()).then(data => {
+                const serverStatusDiv = document.getElementById('externalServerStatus');
+                if (data.isOnline) {
+                    let html = `<div class="alert success">External Server: Online</div>`;
+                    if (data.battery) {
+                        html += `<p>Battery: ${data.battery.percent}% (${data.battery.voltage}V)</p>`;
+                    }
+                    if (data.sleep) {
+                        const current = formatTime(data.sleep.current);
+                        const from = formatTime(data.sleep.sleep_from);
+                        const to = formatTime(data.sleep.sleep_to);
+                        html += `<p>Time: ${current} (Night: ${data.sleep.night_now})</p>`;
+                        html += `<p>Schedule: Sleep at ${from} - Wake up at ${to}</p>`;
+                        html += `<p>Next Event in: ${Math.floor(data.sleep.seconds_to_event / 60)} min</p>`;
+                    }
+                    serverStatusDiv.innerHTML = html;
+                } else {
+                    let err = data.error ? `<br><small style="color:red">${data.error}</small>` : "";
+                    serverStatusDiv.innerHTML = `<div class="alert error">External Server: Offline${err}</div>`;
+                }
+            }).catch(error => {
+                document.getElementById('externalServerStatus').innerHTML = `<div class="alert error">External Server: Request Failed<br><small>${error.message}</small></div>`;
+            });
+        }
+
         setInterval(updateMotionStatus, 500);
         setInterval(updateRecStatus, 2000);
-        window.onload = updateRecStatus;
+        setInterval(updateServerStatus, 15 * 60 * 1000); // Check server status every 15 minutes
+        window.onload = function() {
+            updateRecStatus();
+            updateServerStatus();
+            document.getElementById('serverIpInput').value = '{{EXTERNAL_SERVER_IP}}';
+        };
     </script>
 </head>
 <body>
     <div class="container">
         <h2>{{status}}</h2>
-        
+
         {{alertsHtml}}
 
         <div id="rec-indicator" style="margin-bottom: 10px; font-weight: bold;">Checking status...</div>
         <img src="{{ROUTE_MJPEG}}" alt="Camera Stream">
-        
+
         <div class="info-panel">
             Last movement: <span id="motion-time">Loading...</span><br>
             Battery: <span class="{{batteryClass}}"><strong>{{batteryStatus}}</strong></span>
         </div>
-        
+
         <div style="margin: 15px 0;">
             <button id="btn-rec-start" class="btn-rec-start" onclick="sendCommand('{{ROUTE_START_REC}}')">🔴 START MANUAL RECORDING</button>
             <button id="btn-rec-stop" class="btn-rec-stop" onclick="sendCommand('{{ROUTE_STOP_REC}}')" style="display:none;">⏹️ STOP RECORDING</button>
@@ -104,8 +176,20 @@
             </form>
         </div>
 
-        <button class="btn-play" onclick="sendCommand('{{ROUTE_PLAY}}')">🔊 PLAY</button><br>
-        <button class="btn-stop" onclick="sendCommand('{{ROUTE_STOP}}')">🛑 STOP</button><br>
+        <div class="audio-server-settings">
+            <h3>External Audio Server Settings</h3>
+            <label for="serverIpInput">Server IP:</label><br>
+            <input type="text" id="serverIpInput" placeholder="e.g., 192.168.1.100:8080"><br>
+            <button class="btn-save" onclick="saveServerIp()">Save IP</button>
+            <div id="externalServerStatus" style="margin-top: 10px;">Loading server status...</div>
+            <div style="margin-top: 10px;">
+                <button class="btn-play" onclick="sendCommand('{{ROUTE_EXTERNAL_PLAY_RANDOM}}')" style="background-color: #ff9800; width: auto; font-size: 14px; padding: 10px;">🔀 Play Random (Ext)</button>
+                <button class="btn-stop" onclick="sendCommand('{{ROUTE_EXTERNAL_STOP}}')" style="width: auto; font-size: 14px; padding: 10px;">🛑 Stop (Ext)</button>
+            </div>
+        </div>
+
+        <button class="btn-play" onclick="sendCommand('{{ROUTE_PLAY}}')">🔊 PLAY (Device)</button><br>
+        <button class="btn-stop" onclick="sendCommand('{{ROUTE_STOP}}')">🛑 STOP (Device)</button><br>
         <button class="btn-videos" onclick="location.href='{{ROUTE_VIDEOS_LIST}}'">📂 VIEW RECORDINGS</button>
         <div id="status">Waiting for commands...</div>
     </div>
