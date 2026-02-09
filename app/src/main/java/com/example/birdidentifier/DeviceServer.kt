@@ -173,7 +173,8 @@ class DeviceServer(
      */
     private fun redirectResponse(message: String): Response {
         val encodedMessage = Uri.encode(message)
-        return newFixedLengthResponse(Response.Status.REDIRECT, "text/plain", "").apply {
+        // Using REDIRECT_SEE_OTHER (303) instead of REDIRECT (301) to avoid browser caching
+        return newFixedLengthResponse(Response.Status.REDIRECT_SEE_OTHER, "text/plain", "").apply {
             addHeader("Location", "$ROUTE_ROOT?status=$encodedMessage")
         }
     }

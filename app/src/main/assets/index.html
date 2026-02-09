@@ -36,17 +36,18 @@
     <script>
         function sendCommand(path) {
             document.getElementById('status').innerText = 'Sending ' + path + '...';
-            fetch(path)
+            // Add cache buster
+            const url = path + (path.indexOf('?') === -1 ? '?' : '&') + '_=' + Date.now();
+            console.log('sendCommand url:', url);
+            
+            fetch(url)
                 .then(response => {
-                    // For most commands, the server redirects, and the browser reloads the page
-                    // with the status message in the header. We'll check for non-OK responses
-                    // that were not redirects, which would indicate an unexpected error.
+                    console.log('sendCommand response:', response);
                     if (!response.ok && !response.redirected) {
                         return response.text().then(text => { 
-                            throw new Error(text || 'Request failed with status ${response.status}');
+                            throw new Error(text || 'Request failed with status ' + response.status);
                         });
                     }
-                    // This message is for immediate feedback before the page reloads on redirect.
                     document.getElementById('status').innerText = 'Command ' + path + ' sent successfully.';
                 })
                 .catch(error => {
@@ -54,14 +55,13 @@
                     document.getElementById('status').innerText = 'Error: ' + error.message;
                 });
             
-            // For REC commands, schedule a UI update shortly after sending the command.
             if(path === '{{ROUTE_START_REC}}' || path === '{{ROUTE_STOP_REC}}') {
                 setTimeout(updateRecStatus, 500);
             }
         }
 
         function updateMotionStatus() {
-            fetch('{{ROUTE_MOTION_STATUS}}').then(r => r.text()).then(t => {
+            fetch('{{ROUTE_MOTION_STATUS}}?_=' + Date.now()).then(r => r.text()).then(t => {
                 if (t === "0") { document.getElementById('motion-time').innerText = "No movement detected"; } else {
                     const d = new Date(parseInt(t));
                     document.getElementById('motion-time').innerText = d.toLocaleTimeString() + "." + String(d.getMilliseconds()).padStart(3, '0');
@@ -70,7 +70,7 @@
         }
 
         function updateRecStatus() {
-            fetch('{{ROUTE_REC_STATUS}}').then(r => r.text()).then(status => {
+            fetch('{{ROUTE_REC_STATUS}}?_=' + Date.now()).then(r => r.text()).then(status => {
                 const btnStart = document.getElementById('btn-rec-start');
                 const btnStop = document.getElementById('btn-rec-stop');
                 const indicator = document.getElementById('rec-indicator');
@@ -89,9 +89,8 @@
 
         function saveServerIp() {
             const ip = document.getElementById('serverIpInput').value;
-            fetch('{{ROUTE_UPDATE_SERVER_IP}}?ip=' + encodeURIComponent(ip)).then(r => r.text()).then(response => {
+            fetch('{{ROUTE_UPDATE_SERVER_IP}}?ip=' + encodeURIComponent(ip) + '&_=' + Date.now()).then(r => r.text()).then(response => {
                 document.getElementById('status').innerText = response;
-                // Force immediate refresh of IP in UI
                 updateServerStatus();
             });
         }
@@ -106,7 +105,7 @@
         }
 
         function updateServerStatus() {
-            fetch('{{ROUTE_SERVER_STATUS}}').then(r => r.json()).then(data => {
+            fetch('{{ROUTE_SERVER_STATUS}}?_=' + Date.now()).then(r => r.json()).then(data => {
                 const serverStatusDiv = document.getElementById('externalServerStatus');
                 if (data.isOnline) {
                     let html = `<div class="alert success">External Server: Online</div>`;
@@ -133,7 +132,7 @@
 
         setInterval(updateMotionStatus, 500);
         setInterval(updateRecStatus, 2000);
-        setInterval(updateServerStatus, 15 * 60 * 1000); // Check server status every 15 minutes
+        setInterval(updateServerStatus, 15 * 60 * 1000); 
         window.onload = function() {
             updateRecStatus();
             updateServerStatus();

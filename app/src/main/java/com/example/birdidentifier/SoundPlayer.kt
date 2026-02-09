@@ -84,8 +84,6 @@ object SoundPlayer {
                 }
             }
 
-            // Temporarily disable LoudnessEnhancer for debugging as it can cause issues on some devices.
-            /*
             try {
                 loudnessEnhancer = LoudnessEnhancer(mp.audioSessionId).apply {
                     setTargetGain(BOOST_GAIN)
@@ -95,7 +93,6 @@ object SoundPlayer {
             } catch (e: Exception) {
                 Log.e(TAG, "LoudnessEnhancer initialization failed", e)
             }
-            */
 
             mp.setOnCompletionListener {
                 Log.d(TAG, "Playback completed.")
