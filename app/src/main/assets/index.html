@@ -48,7 +48,11 @@
                             throw new Error(text || 'Request failed with status ' + response.status);
                         });
                     }
-                    document.getElementById('status').innerText = 'Command ' + path + ' sent successfully.';
+                    // For redirects, the browser will follow, so we don't need to do anything here.
+                    // For non-redirects, update status.
+                    if(response.status < 300 || response.status >= 400) {
+                         document.getElementById('status').innerText = 'Command ' + path + ' sent successfully.';
+                    }
                 })
                 .catch(error => {
                     console.error('sendCommand error:', error);
@@ -89,10 +93,7 @@
 
         function saveServerIp() {
             const ip = document.getElementById('serverIpInput').value;
-            fetch('{{ROUTE_UPDATE_SERVER_IP}}?ip=' + encodeURIComponent(ip) + '&_=' + Date.now()).then(r => r.text()).then(response => {
-                document.getElementById('status').innerText = response;
-                updateServerStatus();
-            });
+            location.href = '{{ROUTE_UPDATE_SERVER_IP}}?ip=' + encodeURIComponent(ip);
         }
 
         function formatTime(timeStr) {
@@ -129,6 +130,11 @@
                 document.getElementById('externalServerStatus').innerHTML = `<div class="alert error">External Server: Request Failed<br><small>${error.message}</small></div>`;
             });
         }
+        
+        function setAudioMode() {
+            const mode = document.querySelector('input[name="audio_mode"]:checked').value;
+            location.href = '{{ROUTE_SET_AUDIO_MODE}}?mode=' + mode;
+        }
 
         setInterval(updateMotionStatus, 500);
         setInterval(updateRecStatus, 2000);
@@ -137,6 +143,10 @@
             updateRecStatus();
             updateServerStatus();
             document.getElementById('serverIpInput').value = '{{EXTERNAL_SERVER_IP}}';
+            const audioMode = '{{audioMode}}';
+            if(audioMode) {
+                 document.querySelector(`input[name="audio_mode"][value="${audioMode}"]`).checked = true;
+            }
         };
     </script>
 </head>
@@ -176,9 +186,19 @@
         </div>
 
         <div class="audio-server-settings">
-            <h3>External Audio Server Settings</h3>
+            <h3>Audio Output Settings</h3>
+            <div onchange="setAudioMode()">
+                <input type="radio" id="mode1" name="audio_mode" value="1">
+                <label for="mode1">Phone Only</label><br>
+                <input type="radio" id="mode2" name="audio_mode" value="2">
+                <label for="mode2">External Server Only</label><br>
+                <input type="radio" id="mode3" name="audio_mode" value="3">
+                <label for="mode3">Both</label>
+            </div>
+            <hr>
+            <h4>External Audio Server</h4>
             <label for="serverIpInput">Server IP:</label><br>
-            <input type="text" id="serverIpInput" placeholder="e.g., 192.168.1.100:8080"><br>
+            <input type="text" id="serverIpInput" placeholder="e.g., 192.168.1.100"><br>
             <button class="btn-save" onclick="saveServerIp()">Save IP</button>
             <div id="externalServerStatus" style="margin-top: 10px;">Loading server status...</div>
             <div style="margin-top: 10px;">
@@ -187,8 +207,8 @@
             </div>
         </div>
 
-        <button class="btn-play" onclick="sendCommand('{{ROUTE_PLAY}}')">🔊 PLAY (Device)</button><br>
-        <button class="btn-stop" onclick="sendCommand('{{ROUTE_STOP}}')">🛑 STOP (Device)</button><br>
+        <button class="btn-play" onclick="sendCommand('{{ROUTE_PLAY}}')">🔊 PLAY SOUND</button><br>
+        <button class="btn-stop" onclick="sendCommand('{{ROUTE_STOP}}')">🛑 STOP SOUND</button><br>
         <button class="btn-videos" onclick="location.href='{{ROUTE_VIDEOS_LIST}}'">📂 VIEW RECORDINGS</button>
         <div id="status">Waiting for commands...</div>
     </div>

@@ -76,6 +76,8 @@ class DeviceServer(
         const val ROUTE_UPDATE_SERVER_IP = "/update-server-ip"
         /** Returns the status of the external audio server. */
         const val ROUTE_SERVER_STATUS = "/server-status"
+        /** Updates the audio output mode. */
+        const val ROUTE_SET_AUDIO_MODE = "/set-audio-mode"
 
         private const val PREFS_NAME = "BirdPrefs"
         private const val KEY_EXTERNAL_SERVER_IP = "external_server_ip"
@@ -106,7 +108,7 @@ class DeviceServer(
                 try {
                     Log.d(TAG, "Executing PLAY command on device.")
                     SoundPlayer.play(context)
-                    redirectResponse("Sound played on device")
+                    redirectResponse("Sound command executed")
                 } catch (e: Exception) {
                     Log.e(TAG, "Error executing PLAY command", e)
                     newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "Error playing sound: ${e.message}")
@@ -114,9 +116,9 @@ class DeviceServer(
             }
 
             ROUTE_STOP -> {
-                Log.d(TAG, "Executing STOP command on device.")
-                SoundPlayer.stop()
-                redirectResponse("Sound stopped on device")
+                Log.d(TAG, "Executing STOP command.")
+                SoundPlayer.stop(context)
+                redirectResponse("Stop command executed")
             }
 
             ROUTE_EXTERNAL_PLAY_RANDOM -> sendCommandToExternalServer("/play_random")
@@ -158,6 +160,12 @@ class DeviceServer(
 
             ROUTE_UPDATE_SERVER_IP -> updateServerIp(session.parameters["ip"]?.firstOrNull())
             ROUTE_SERVER_STATUS -> getServerStatusResponse()
+
+            ROUTE_SET_AUDIO_MODE -> {
+                val modeInt = session.parameters["mode"]?.firstOrNull()?.toIntOrNull() ?: 1
+                SoundPlayer.setAudioMode(context, SoundPlayer.AudioMode.fromInt(modeInt))
+                redirectResponse("Audio mode updated")
+            }
 
             ROUTE_ROOT -> createHtmlResponse(statusMessage)
             else -> {
@@ -594,6 +602,7 @@ class DeviceServer(
         val storageStatus = StorageManager.getStorageStatus(context)
         val (batteryLevel, isCharging) = getBatteryInfo()
         val externalServerIp = getSavedServerIp()
+        val audioMode = SoundPlayer.getAudioMode(context).value
 
         val usedGb = "%.2f".format(storageStatus.totalUsedByAppBytes / (1024.0 * 1024.0 * 1024.0))
         val freeGb = "%.2f".format(storageStatus.freeOnDiskBytes / (1024.0 * 1024.0 * 1024.0))
@@ -636,6 +645,8 @@ class DeviceServer(
             .replace("{{EXTERNAL_SERVER_IP}}", externalServerIp)
             .replace("{{ROUTE_EXTERNAL_PLAY_RANDOM}}", ROUTE_EXTERNAL_PLAY_RANDOM)
             .replace("{{ROUTE_EXTERNAL_STOP}}", ROUTE_EXTERNAL_STOP)
+            .replace("{{ROUTE_SET_AUDIO_MODE}}", ROUTE_SET_AUDIO_MODE)
+            .replace("{{audioMode}}", audioMode.toString())
 
         Log.d(TAG, "createHtmlResponse: Finished creating HTML response.")
         return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", html)

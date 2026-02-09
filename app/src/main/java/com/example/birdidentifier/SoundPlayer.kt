@@ -6,24 +6,45 @@ import android.media.PlaybackParams
 import android.media.audiofx.LoudnessEnhancer
 import android.os.Build
 import android.util.Log
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlin.concurrent.thread
 import kotlin.random.Random
 
 /**
  * A singleton utility for playing random notification or deterrent sounds.
- * 
- * It manages [MediaPlayer] instances and uses [LoudnessEnhancer] to boost 
+ *
+ * It manages [MediaPlayer] instances and uses [LoudnessEnhancer] to boost
  * audio output levels significantly.
+ * It also supports streaming audio to an external server.
  */
 object SoundPlayer {
     private const val TAG = "SoundPlayer"
     private var mediaPlayer: MediaPlayer? = null
     private var loudnessEnhancer: LoudnessEnhancer? = null
-    
-    /** 
-     * Target gain for the loudness enhancer in mB (millibels). 
+
+    /**
+     * Target gain for the loudness enhancer in mB (millibels).
      * 3000 mB equals +30 dB boost.
      */
     private const val BOOST_GAIN = 3000
+
+    private const val PREFS_NAME = "BirdPrefs"
+    private const val KEY_AUDIO_MODE = "audio_mode"
+    private const val KEY_EXTERNAL_SERVER_IP = "external_server_ip"
+
+    /**
+     * Audio output modes.
+     */
+    enum class AudioMode(val value: Int) {
+        PHONE_ONLY(1),
+        EXTERNAL_ONLY(2),
+        BOTH(3);
+
+        companion object {
+            fun fromInt(value: Int) = values().find { it.value == value } ?: PHONE_ONLY
+        }
+    }
 
     /** List of resource IDs for the sounds to be played. */
     private val sounds = listOf(
@@ -39,38 +60,77 @@ object SoundPlayer {
     )
 
     /**
-     * Plays a random sound from the predefined [sounds] list.
-     *
-     * Automatically applies a loudness boost, randomizes playback speed
-     * within ±20% of the standard rate, and stops any currently
-     * playing sound before starting a new one.
-     *
-     * @param context The Android context used to create the [MediaPlayer].
-     * @throws IllegalStateException if the MediaPlayer cannot be created.
+     * Sets the audio output mode.
+     */
+    fun setAudioMode(context: Context, mode: AudioMode) {
+        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        sharedPrefs.edit().putInt(KEY_AUDIO_MODE, mode.value).apply()
+        Log.d(TAG, "Audio mode set to $mode")
+    }
+
+    /**
+     * Gets the current audio output mode.
+     */
+    fun getAudioMode(context: Context): AudioMode {
+        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return AudioMode.fromInt(sharedPrefs.getInt(KEY_AUDIO_MODE, AudioMode.PHONE_ONLY.value))
+    }
+
+    /**
+     * Plays a random sound from the predefined [sounds] list based on the current mode.
      */
     @Synchronized
     fun play(context: Context) {
         Log.d(TAG, "Play command received.")
-        stop()
-
+        val mode = getAudioMode(context)
         val randomSound = sounds.random()
-        Log.d(TAG, "Attempting to create MediaPlayer for sound resource ID: $randomSound")
-        
+
+        if (mode == AudioMode.PHONE_ONLY || mode == AudioMode.BOTH) {
+            playOnPhone(context, randomSound)
+        }
+
+        if (mode == AudioMode.EXTERNAL_ONLY || mode == AudioMode.BOTH) {
+            streamToExternalServer(context, randomSound)
+        }
+    }
+
+    /**
+     * Stops playback based on the current audio mode.
+     */
+    @Synchronized
+    fun stop(context: Context) {
+        Log.d(TAG, "Stop command received.")
+        val mode = getAudioMode(context)
+
+        if (mode == AudioMode.PHONE_ONLY || mode == AudioMode.BOTH) {
+            stopPhonePlayback()
+        }
+
+        if (mode == AudioMode.EXTERNAL_ONLY || mode == AudioMode.BOTH) {
+            stopExternalStream(context)
+        }
+    }
+
+    /**
+     * Plays a sound on the phone's speaker.
+     */
+    private fun playOnPhone(context: Context, resourceId: Int) {
+        stopPhonePlayback()
+        Log.d(TAG, "Attempting to create MediaPlayer for sound resource ID: $resourceId")
+
         mediaPlayer = try {
-            MediaPlayer.create(context, randomSound)
+            MediaPlayer.create(context, resourceId)
         } catch (e: Exception) {
-            Log.e(TAG, "MediaPlayer.create() threw an exception for resource ID $randomSound", e)
-            throw IllegalStateException("Failed to load sound resource: ${e.message}", e)
+            Log.e(TAG, "MediaPlayer.create() threw an exception for resource ID $resourceId", e)
+            null
         }
 
         if (mediaPlayer == null) {
-            val errorMsg = "MediaPlayer.create() returned null for resource ID $randomSound. The file may be missing, corrupt, or in an unsupported format."
-            Log.e(TAG, errorMsg)
-            throw IllegalStateException(errorMsg)
+            Log.e(TAG, "MediaPlayer.create() returned null for resource ID $resourceId")
+            return
         }
 
         mediaPlayer?.let { mp ->
-            Log.d(TAG, "MediaPlayer created successfully. Audio session ID: ${mp.audioSessionId}")
             val randomVolume = 1.0f - (Random.nextFloat() * 0.15f)
             mp.setVolume(randomVolume, randomVolume)
 
@@ -78,7 +138,6 @@ object SoundPlayer {
                 try {
                     val randomSpeed = 0.8f + (Random.nextFloat() * 0.4f)
                     mp.playbackParams = PlaybackParams().apply { speed = randomSpeed }
-                    Log.d(TAG, "Playback speed set to ${randomSpeed}x")
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to set playback speed", e)
                 }
@@ -89,56 +148,113 @@ object SoundPlayer {
                     setTargetGain(BOOST_GAIN)
                     enabled = true
                 }
-                Log.d(TAG, "LoudnessEnhancer enabled with ${BOOST_GAIN}mB gain.")
             } catch (e: Exception) {
                 Log.e(TAG, "LoudnessEnhancer initialization failed", e)
             }
 
             mp.setOnCompletionListener {
-                Log.d(TAG, "Playback completed.")
-                stop()
+                Log.d(TAG, "Phone playback completed.")
+                stopPhonePlayback()
             }
 
-            mp.setOnErrorListener { _, what, extra ->
-                Log.e(TAG, "MediaPlayer internal error. What: $what, Extra: $extra")
-                stop() // Stop and release resources on error
-                true // Returning true indicates the error was handled
+            mp.setOnErrorListener { _, _, _ ->
+                stopPhonePlayback()
+                true
             }
 
             mp.start()
-            Log.d(TAG, "Playback started.")
+            Log.d(TAG, "Phone playback started.")
         }
     }
 
     /**
-     * Stops the current playback and releases both [MediaPlayer] 
-     * and [LoudnessEnhancer] resources.
+     * Streams a sound to the external server.
      */
-    @Synchronized
-    fun stop() {
-        if (mediaPlayer == null && loudnessEnhancer == null) {
-            return // Nothing to do
+    private fun streamToExternalServer(context: Context, resourceId: Int) {
+        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val serverIp = sharedPrefs.getString(KEY_EXTERNAL_SERVER_IP, "") ?: ""
+        if (serverIp.isBlank()) {
+            Log.w(TAG, "Cannot stream: External server IP not set.")
+            return
         }
-        Log.d(TAG, "Stop command received.")
-        try {
-            loudnessEnhancer?.let {
-                it.enabled = false
-                it.release()
-                Log.d(TAG, "LoudnessEnhancer released.")
-            }
-            loudnessEnhancer = null
 
-            mediaPlayer?.let{
-                if (it.isPlaying) {
-                    it.stop()
-                    Log.d(TAG, "MediaPlayer stopped.")
+        thread {
+            try {
+                Log.d(TAG, "Starting audio conversion for streaming: $resourceId")
+                val wavData = AudioConverter.convertToWav22050(context, resourceId)
+                if (wavData == null) {
+                    Log.e(TAG, "Failed to convert audio for streaming.")
+                    return@thread
                 }
-                it.release()
-                Log.d(TAG, "MediaPlayer released.")
+
+                val url = URL("http://$serverIp/stream")
+                Log.d(TAG, "Streaming to external server: $url (${wavData.size} bytes)")
+                val connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/octet-stream")
+                connection.setRequestProperty("Content-Length", wavData.size.toString())
+                connection.connectTimeout = 5000
+                connection.readTimeout = 30000
+
+                connection.outputStream.use { it.write(wavData) }
+
+                val responseCode = connection.responseCode
+                if (responseCode == HttpURLConnection.HTTP_OK) {
+                    Log.d(TAG, "Stream successful. Server response: ${connection.inputStream.bufferedReader().readText()}")
+                } else {
+                    Log.e(TAG, "Stream failed. Server returned code $responseCode: ${connection.responseMessage}")
+                }
+                connection.disconnect()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error during streaming to external server", e)
             }
+        }
+    }
+
+    /**
+     * Sends a stop command to the configured external server.
+     */
+    private fun stopExternalStream(context: Context) {
+        val sharedPrefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val serverIp = sharedPrefs.getString(KEY_EXTERNAL_SERVER_IP, "") ?: ""
+        if (serverIp.isBlank()) {
+            Log.w(TAG, "Cannot send stop command: External server IP not set.")
+            return
+        }
+
+        thread {
+            try {
+                val url = URL("http://$serverIp/stop")
+                Log.d(TAG, "Sending STOP command to external server: $url")
+                val connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.connectTimeout = 3000
+                connection.readTimeout = 3000
+
+                val responseCode = connection.responseCode
+                if (responseCode == HttpURLConnection.HTTP_OK) {
+                    Log.d(TAG, "External server stop command successful.")
+                } else {
+                    Log.w(TAG, "External server stop command failed with code: $responseCode")
+                }
+                connection.disconnect()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error sending stop command to external server", e)
+            }
+        }
+    }
+
+    private fun stopPhonePlayback() {
+        if (mediaPlayer == null && loudnessEnhancer == null) return
+        Log.d(TAG, "Stopping phone playback.")
+        try {
+            loudnessEnhancer?.apply { enabled = false; release() }
+            loudnessEnhancer = null
+            mediaPlayer?.apply { if (isPlaying) stop(); release() }
             mediaPlayer = null
         } catch (e: Exception) {
-            Log.e(TAG, "Exception during stop()", e)
+            Log.e(TAG, "Exception during stopPhonePlayback()", e)
             mediaPlayer = null
             loudnessEnhancer = null
         }
