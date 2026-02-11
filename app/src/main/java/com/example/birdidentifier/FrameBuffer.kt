@@ -38,4 +38,15 @@ object FrameBuffer {
      * the web interface.
      */
     val isManualRecording = AtomicBoolean(false)
+
+    /**
+     * The current zoom ratio of the camera.
+     * A value of 1.0 means no zoom.
+     */
+    val zoomLevel = AtomicReference(1.0f)
+
+    /**
+     * A flag to signal that the zoom level has been changed from the web interface.
+     */
+    val zoomChanged = AtomicBoolean(false)
 }

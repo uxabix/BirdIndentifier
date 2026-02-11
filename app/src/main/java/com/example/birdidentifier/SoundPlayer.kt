@@ -27,7 +27,7 @@ object SoundPlayer {
      * Target gain for the loudness enhancer in mB (millibels).
      * 3000 mB equals +30 dB boost.
      */
-    private const val BOOST_GAIN = 3000
+    private const val BOOST_GAIN = 10000
 
     private const val PREFS_NAME = "BirdPrefs"
     private const val KEY_AUDIO_MODE = "audio_mode"

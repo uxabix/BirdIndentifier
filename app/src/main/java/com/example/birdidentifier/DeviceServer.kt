@@ -78,6 +78,10 @@ class DeviceServer(
         const val ROUTE_SERVER_STATUS = "/server-status"
         /** Updates the audio output mode. */
         const val ROUTE_SET_AUDIO_MODE = "/set-audio-mode"
+        /** Zoom in. */
+        const val ROUTE_ZOOM_IN = "/zoom/in"
+        /** Zoom out. */
+        const val ROUTE_ZOOM_OUT = "/zoom/out"
 
         private const val PREFS_NAME = "BirdPrefs"
         private const val KEY_EXTERNAL_SERVER_IP = "external_server_ip"
@@ -157,6 +161,22 @@ class DeviceServer(
                 "text/plain",
                 FrameBuffer.isManualRecording.get().toString()
             )
+
+            ROUTE_ZOOM_IN -> {
+                val currentZoom = FrameBuffer.zoomLevel.get()
+                val newZoom = (currentZoom + 0.1f).coerceAtMost(4.0f)
+                FrameBuffer.zoomLevel.set(newZoom)
+                FrameBuffer.zoomChanged.set(true)
+                redirectResponse("Zoom level set to $newZoom")
+            }
+
+            ROUTE_ZOOM_OUT -> {
+                val currentZoom = FrameBuffer.zoomLevel.get()
+                val newZoom = (currentZoom - 0.1f).coerceAtLeast(1.0f)
+                FrameBuffer.zoomLevel.set(newZoom)
+                FrameBuffer.zoomChanged.set(true)
+                redirectResponse("Zoom level set to $newZoom")
+            }
 
             ROUTE_UPDATE_SERVER_IP -> updateServerIp(session.parameters["ip"]?.firstOrNull())
             ROUTE_SERVER_STATUS -> getServerStatusResponse()
@@ -647,6 +667,8 @@ class DeviceServer(
             .replace("{{ROUTE_EXTERNAL_STOP}}", ROUTE_EXTERNAL_STOP)
             .replace("{{ROUTE_SET_AUDIO_MODE}}", ROUTE_SET_AUDIO_MODE)
             .replace("{{audioMode}}", audioMode.toString())
+            .replace("{{ROUTE_ZOOM_IN}}", ROUTE_ZOOM_IN)
+            .replace("{{ROUTE_ZOOM_OUT}}", ROUTE_ZOOM_OUT)
 
         Log.d(TAG, "createHtmlResponse: Finished creating HTML response.")
         return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", html)

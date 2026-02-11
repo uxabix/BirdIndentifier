@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -40,6 +41,7 @@ class CameraService : Service(), LifecycleOwner {
     private lateinit var videoWriter: VideoWriter
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var camera: Camera? = null
 
     /** Stores the Y-plane of the previous frame to calculate pixel differences for motion detection. */
     private var previousYPlane: ByteArray? = null
@@ -130,6 +132,11 @@ class CameraService : Service(), LifecycleOwner {
                 .build()
 
             imageAnalysis.setAnalyzer(cameraExecutor) { image ->
+                if (FrameBuffer.zoomChanged.compareAndSet(true, false)) {
+                    val newZoom = FrameBuffer.zoomLevel.get()
+                    camera?.cameraControl?.setZoomRatio(newZoom)
+                }
+
                 val yBuffer = image.planes[0].buffer
                 val currentYPlane = ByteArray(yBuffer.remaining())
                 yBuffer.get(currentYPlane)
@@ -183,7 +190,7 @@ class CameraService : Service(), LifecycleOwner {
 
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
             cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis)
+            camera = cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis)
 
         }, ContextCompat.getMainExecutor(this))
     }
