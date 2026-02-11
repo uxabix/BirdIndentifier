@@ -1,12 +1,15 @@
 package com.example.birdidentifier
 
 import android.app.*
+import android.content.Context
 import android.content.Intent
 import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.YuvImage
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -25,8 +28,8 @@ import java.util.concurrent.Executors
  * A foreground service that manages the camera lifecycle, performs motion detection,
  * and handles video recording logic.
  *
- * This service implements [LifecycleOwner] to integrate with CameraX lifecycle-aware 
- * components. It starts an MJPEG server via [DeviceServer] and handles frame processing 
+ * This service implements [LifecycleOwner] to integrate with CameraX lifecycle-aware
+ * components. It starts an MJPEG server via [DeviceServer] and handles frame processing
  * in a dedicated background thread.
  */
 class CameraService : Service(), LifecycleOwner {
@@ -35,19 +38,21 @@ class CameraService : Service(), LifecycleOwner {
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private lateinit var deviceServer: DeviceServer
     private lateinit var videoWriter: VideoWriter
-    
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
     /** Stores the Y-plane of the previous frame to calculate pixel differences for motion detection. */
     private var previousYPlane: ByteArray? = null
-    
+
     /** Countdown of frames to continue recording after the last motion event was detected. */
     private var framesRemainingAfterMotion = 0
 
     /** Tracks the previous state of manual recording to detect when it stops. */
     private var wasManualRecording = false
-    
+
     /** Post-delay duration after motion: 2 minutes assuming 30 FPS. */
     private val MOTION_POST_DELAY_FRAMES = 30 * 60 * 2
-    
+
     /** Safety limit for a single recording: 20 minutes assuming 30 FPS. */
     private val MAX_RECORDING_FRAMES = 30 * 60 * 20
 
@@ -61,6 +66,7 @@ class CameraService : Service(), LifecycleOwner {
         super.onCreate()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         videoWriter = VideoWriter(this)
+        acquireWakeLocks()
         startForegroundNotification()
         startMjpegServer()
         startCamera()
@@ -84,6 +90,7 @@ class CameraService : Service(), LifecycleOwner {
         if (::deviceServer.isInitialized) {
             deviceServer.stop()
         }
+        releaseWakeLocks()
         super.onDestroy()
     }
 
@@ -130,7 +137,7 @@ class CameraService : Service(), LifecycleOwner {
                 val motionDetected = hasMotion(previousYPlane, currentYPlane)
                 val jpeg = imageToJpeg(image)
                 val timestamp = System.currentTimeMillis()
-                
+
                 // Update live stream frame
                 FrameBuffer.latestFrame.set(jpeg)
 
@@ -247,5 +254,24 @@ class CameraService : Service(), LifecycleOwner {
     private fun startMjpegServer() {
         deviceServer = DeviceServer(8080, FrameBuffer.latestFrame, this)
         deviceServer.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+    }
+
+    private fun acquireWakeLocks() {
+        // CPU wake lock
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BirdIdentifier::WakeLock")
+        wakeLock?.acquire()
+
+        // WiFi lock
+        val wifiManager = getSystemService(Context.WIFI_SERVICE) as WifiManager
+        wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "BirdIdentifier::WifiLock")
+        wifiLock?.acquire()
+    }
+
+    private fun releaseWakeLocks() {
+        wakeLock?.release()
+        wakeLock = null
+        wifiLock?.release()
+        wifiLock = null
     }
 }
