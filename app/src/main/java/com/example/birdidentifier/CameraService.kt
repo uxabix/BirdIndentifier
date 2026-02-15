@@ -28,10 +28,6 @@ import java.util.concurrent.Executors
 /**
  * A foreground service that manages the camera lifecycle, performs motion detection,
  * and handles video recording logic.
- *
- * This service implements [LifecycleOwner] to integrate with CameraX lifecycle-aware
- * components. It starts an MJPEG server via [DeviceServer] and handles frame processing
- * in a dedicated background thread.
  */
 class CameraService : Service(), LifecycleOwner {
 
@@ -43,27 +39,20 @@ class CameraService : Service(), LifecycleOwner {
     private var wifiLock: WifiManager.WifiLock? = null
     private var camera: Camera? = null
 
-    /** Stores the Y-plane of the previous frame to calculate pixel differences for motion detection. */
     private var previousYPlane: ByteArray? = null
+    private var currentYPlane: ByteArray? = null
+    private var nv21: ByteArray? = null
+    private val jpegOutputStream = ByteArrayOutputStream()
 
-    /** Countdown of frames to continue recording after the last motion event was detected. */
     private var framesRemainingAfterMotion = 0
-
-    /** Tracks the previous state of manual recording to detect when it stops. */
     private var wasManualRecording = false
+    private var isCurrentlyRecording = false
 
-    /** Post-delay duration after motion: 2 minutes assuming 30 FPS. */
-    private val MOTION_POST_DELAY_FRAMES = 30 * 60 * 2
-
-    /** Safety limit for a single recording: 20 minutes assuming 30 FPS. */
-    private val MAX_RECORDING_FRAMES = 30 * 60 * 20
+    private val MOTION_POST_DELAY_FRAMES = 30 * 10 // 10 seconds at 30 FPS
 
     override val lifecycle: Lifecycle
         get() = lifecycleRegistry
 
-    /**
-     * Initializes the service, sets up the [Lifecycle], and starts background tasks.
-     */
     override fun onCreate() {
         super.onCreate()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
@@ -74,23 +63,20 @@ class CameraService : Service(), LifecycleOwner {
         startCamera()
     }
 
-    /**
-     * Marks the service as started and ensures it remains running.
-     */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
         return START_STICKY
     }
 
-    /**
-     * Cleans up resources, stops the server, and shuts down the camera executor.
-     */
     override fun onDestroy() {
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
         cameraExecutor.shutdown()
         if (::deviceServer.isInitialized) {
             deviceServer.stop()
+        }
+        if (isCurrentlyRecording) {
+            videoWriter.stopRecording()
         }
         releaseWakeLocks()
         super.onDestroy()
@@ -98,20 +84,11 @@ class CameraService : Service(), LifecycleOwner {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    /**
-     * Detects motion by comparing the average luminance difference between two frames.
-     *
-     * @param prevYPlane The Y-plane (brightness) data from the previous frame.
-     * @param currYPlane The Y-plane data from the current frame.
-     * @param threshold Sensitivity threshold; higher values require more movement.
-     * @return True if motion is detected, false otherwise.
-     */
     fun hasMotion(prevYPlane: ByteArray?, currYPlane: ByteArray, threshold: Int = 10): Boolean {
         if (prevYPlane == null || prevYPlane.size != currYPlane.size) return true
         if (currYPlane.isEmpty()) return false
 
         var diff = 0L
-        // Sample every 4th pixel to reduce CPU load
         for (i in currYPlane.indices step 4) {
             diff += kotlin.math.abs(currYPlane[i].toInt() - prevYPlane[i].toInt())
         }
@@ -119,9 +96,6 @@ class CameraService : Service(), LifecycleOwner {
         return avgDifference > threshold
     }
 
-    /**
-     * Configures CameraX [ImageAnalysis] and binds it to the service lifecycle.
-     */
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
@@ -138,53 +112,63 @@ class CameraService : Service(), LifecycleOwner {
                 }
 
                 val yBuffer = image.planes[0].buffer
-                val currentYPlane = ByteArray(yBuffer.remaining())
-                yBuffer.get(currentYPlane)
+                val ySize = yBuffer.remaining()
+                
+                if (currentYPlane == null || currentYPlane?.size != ySize) {
+                    currentYPlane = ByteArray(ySize)
+                }
+                val currY = currentYPlane!!
+                yBuffer.get(currY)
 
-                val motionDetected = hasMotion(previousYPlane, currentYPlane)
+                val motionDetected = hasMotion(previousYPlane, currY)
                 val jpeg = imageToJpeg(image)
                 val timestamp = System.currentTimeMillis()
 
-                // Update live stream frame
                 FrameBuffer.latestFrame.set(jpeg)
 
                 val manualRec = FrameBuffer.isManualRecording.get()
 
-                // Check for stop-recording transition
-                if (wasManualRecording && !manualRec) {
-                    Log.d("CameraService", "Manual recording stopped. Finalizing.")
-                    finalizeRecording()
-                }
-                wasManualRecording = manualRec
+                // Recording logic
+                val shouldBeRecording = motionDetected || manualRec || framesRemainingAfterMotion > 0
 
-                if (motionDetected || manualRec) {
-                    if (framesRemainingAfterMotion == 0 && !manualRec && FrameBuffer.recordingBuffer.isEmpty()) {
-                        Log.d("CameraService", "Motion detected! Starting recording.")
+                if (shouldBeRecording) {
+                    if (!isCurrentlyRecording) {
+                        Log.d("CameraService", "Starting recording to disk...")
+                        videoWriter.startRecording(image.width, image.height)
+                        isCurrentlyRecording = true
                     }
+                    
+                    videoWriter.addFrame(jpeg)
 
                     if (motionDetected) {
                         framesRemainingAfterMotion = MOTION_POST_DELAY_FRAMES
                         FrameBuffer.lastMotionTime.set(timestamp)
+                    } else if (framesRemainingAfterMotion > 0 && !manualRec) {
+                        framesRemainingAfterMotion--
                     }
-
-                    // Append frame to memory buffer
-                    if (FrameBuffer.recordingBuffer.size < MAX_RECORDING_FRAMES) {
-                        FrameBuffer.recordingBuffer.add(jpeg to timestamp)
-                    } else if (FrameBuffer.recordingBuffer.size == MAX_RECORDING_FRAMES) {
-                        Log.w("CameraService", "Max recording length reached. Finalizing.")
-                        finalizeRecording()
-                    }
-                } else if (framesRemainingAfterMotion > 0) {
-                    // Continue recording for the post-delay period
-                    framesRemainingAfterMotion--
-                    FrameBuffer.recordingBuffer.add(jpeg to timestamp)
-
-                    if (framesRemainingAfterMotion == 0 && !manualRec) {
-                        finalizeRecording()
+                } else {
+                    if (isCurrentlyRecording) {
+                        Log.d("CameraService", "Stopping recording.")
+                        videoWriter.stopRecording()
+                        isCurrentlyRecording = false
                     }
                 }
 
-                previousYPlane = currentYPlane
+                if (wasManualRecording && !manualRec && isCurrentlyRecording) {
+                     // Manual recording stopped, but we might still have motion. 
+                     // If no motion, stop immediately.
+                     if (!motionDetected && framesRemainingAfterMotion <= 0) {
+                         videoWriter.stopRecording()
+                         isCurrentlyRecording = false
+                     }
+                }
+                wasManualRecording = manualRec
+
+                if (previousYPlane == null || previousYPlane?.size != ySize) {
+                    previousYPlane = ByteArray(ySize)
+                }
+                System.arraycopy(currY, 0, previousYPlane!!, 0, ySize)
+                
                 image.close()
             }
 
@@ -195,56 +179,36 @@ class CameraService : Service(), LifecycleOwner {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    /**
-     * Hands over the accumulated frame buffer to [VideoWriter] to save as a file.
-     * Clears the memory buffer and resets recording states.
-     */
-    private fun finalizeRecording() {
-        if (FrameBuffer.recordingBuffer.isEmpty()) return
-        Log.d("CameraService", "Finalizing recording session.")
-        val framesToSave = FrameBuffer.recordingBuffer.toList()
-        FrameBuffer.recordingBuffer.clear()
-        framesRemainingAfterMotion = 0
-        // We don't set manualRec to false here because it might have already been set to false
-        // by the user, which is what triggered this call.
-        videoWriter.saveVideoWithTimestamps(framesToSave)
-    }
-
-    /**
-     * Converts a CameraX [ImageProxy] (typically YUV_420_888) to a JPEG byte array.
-     *
-     * @param image The image frame from the camera.
-     * @return A byte array containing the JPEG-compressed image.
-     */
     private fun imageToJpeg(image: ImageProxy): ByteArray {
         val yBuffer = image.planes[0].buffer
         val uBuffer = image.planes[1].buffer
         val vBuffer = image.planes[2].buffer
         yBuffer.rewind(); uBuffer.rewind(); vBuffer.rewind()
+
         val ySize = yBuffer.remaining()
         val uSize = uBuffer.remaining()
         val vSize = vBuffer.remaining()
-        val nv21 = ByteArray(ySize + uSize + vSize)
-        yBuffer.get(nv21, 0, ySize)
-        vBuffer.get(nv21, ySize, vSize)
-        uBuffer.get(nv21, ySize + vSize, uSize)
-        val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
-        val out = ByteArrayOutputStream()
-        yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 80, out)
-        return out.toByteArray()
+
+        val totalSize = ySize + uSize + vSize
+        if (nv21 == null || nv21?.size != totalSize) {
+            nv21 = ByteArray(totalSize)
+        }
+
+        val currentNv21 = nv21!!
+        yBuffer.get(currentNv21, 0, ySize)
+        vBuffer.get(currentNv21, ySize, vSize)
+        uBuffer.get(currentNv21, ySize + vSize, uSize)
+
+        val yuvImage = YuvImage(currentNv21, ImageFormat.NV21, image.width, image.height, null)
+        jpegOutputStream.reset()
+        yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 80, jpegOutputStream)
+        return jpegOutputStream.toByteArray()
     }
 
-    /**
-     * Starts the service in the foreground and creates a persistent notification.
-     */
     private fun startForegroundNotification() {
         val channelId = "camera_stream"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                channelId,
-                "Camera Streaming",
-                NotificationManager.IMPORTANCE_LOW
-            )
+            val channel = NotificationChannel(channelId, "Camera Streaming", NotificationManager.IMPORTANCE_LOW)
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
         val notification = NotificationCompat.Builder(this, channelId)
@@ -255,30 +219,25 @@ class CameraService : Service(), LifecycleOwner {
         startForeground(1, notification)
     }
 
-    /**
-     * Starts the local [DeviceServer] on port 8080.
-     */
     private fun startMjpegServer() {
         deviceServer = DeviceServer(8080, FrameBuffer.latestFrame, this)
         deviceServer.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
     }
 
     private fun acquireWakeLocks() {
-        // CPU wake lock
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BirdIdentifier::WakeLock")
         wakeLock?.acquire()
 
-        // WiFi lock
         val wifiManager = getSystemService(Context.WIFI_SERVICE) as WifiManager
         wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "BirdIdentifier::WifiLock")
         wifiLock?.acquire()
     }
 
     private fun releaseWakeLocks() {
-        wakeLock?.release()
+        if (wakeLock?.isHeld == true) wakeLock?.release()
         wakeLock = null
-        wifiLock?.release()
+        if (wifiLock?.isHeld == true) wifiLock?.release()
         wifiLock = null
     }
 }

@@ -196,15 +196,14 @@
         <h2 id="status">{{status}}</h2>
 
         {{alertsHtml}}
-
-        <div id="rec-indicator" style="margin-bottom: 10px; font-weight: bold;">Checking status...</div>
-        <img src="{{ROUTE_MJPEG}}" alt="Camera Stream">
-
         <div class="info-panel">
             <strong>Last movement:</strong> <span id="motion-time">Loading...</span><br>
             <strong>Device Battery:</strong> <span class="{{batteryClass}}">{{batteryStatus}}</span>
             <div id="externalServerStatus">Loading server status...</div>
         </div>
+
+        <div id="rec-indicator" style="margin-bottom: 10px; font-weight: bold;">Checking status...</div>
+        <img src="{{ROUTE_MJPEG}}" alt="Camera Stream">
 
         <div class="main-controls">
             <div class="control-group">
@@ -225,7 +224,7 @@
                 <h4>Zoom: <span id="zoomValue">{{currentZoom}}</span>x</h4>
                 <input type="range" id="zoomSlider" min="1.0" max="4.0" step="0.1" value="{{currentZoom}}" oninput="updateZoom(this.value)" style="width: 100%; margin-top: 5px;">
             </div>
-             <div class="control-group">
+            <div class="control-group">
                 <h4>External Sound</h4>
                 <div class="button-group">
                     <button onclick="sendCommand('{{ROUTE_EXTERNAL_PLAY_RANDOM}}')" style="background-color: #ff9800;">🔀</button>
@@ -233,7 +232,7 @@
                 </div>
             </div>
         </div>
-        
+
         <button class="btn-videos" onclick="location.href='{{ROUTE_VIDEOS_LIST}}'" style="width:100%; padding: 15px; margin-bottom: 20px;">📂 VIEW ALL RECORDINGS</button>
 
         <div class="folder-panel">
@@ -268,7 +267,7 @@
             <input type="text" id="serverIpInput" placeholder="e.g., 192.168.1.100"><br>
             <button class="btn-save" onclick="saveServerIp()">Save IP</button>
         </div>
-        
+
     </div>
 </body>
 </html>

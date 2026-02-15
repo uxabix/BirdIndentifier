@@ -5,157 +5,176 @@ import android.graphics.BitmapFactory
 import android.media.*
 import android.net.Uri
 import android.os.Environment
+import android.os.Handler
+import android.os.HandlerThread
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * A utility class responsible for encoding a sequence of JPEG frames into an MP4 video file.
- *
- * It uses [MediaCodec] for AVC encoding and [MediaMuxer] to package the encoded stream. 
- * The writer handles both internal storage and external storage via the Storage Access Framework (SAF).
- *
- * @param context The Android context used for content resolution and file management.
+ * Supports streaming frames directly to disk with pacing to avoid "fast-forward" effects at the start.
  */
 class VideoWriter(private val context: Context) {
 
     private val TAG = "VideoWriter"
-    
-    /** Target bitrate for the video encoder: 2 Mbps. */
     private val BIT_RATE = 2000000
+    private val FRAME_RATE = 30 
+    private val FRAME_INTERVAL_MS = 1000L / FRAME_RATE
+
+    private var codec: MediaCodec? = null
+    private var muxer: MediaMuxer? = null
+    private var pfd: android.os.ParcelFileDescriptor? = null
+    private var inputSurface: android.view.Surface? = null
+    private var trackIndex = -1
+    private val bufferInfo = MediaCodec.BufferInfo()
+    
+    private val isRecording = AtomicBoolean(false)
+    private var writerThread: HandlerThread? = null
+    private var writerHandler: Handler? = null
+    
+    private var lastFrameTimeMs: Long = 0
 
     /**
-     * Encodes a list of JPEG frames into an MP4 video file on a background thread.
-     *
-     * This method calculates the average FPS based on frame timestamps and automatically 
-     * triggers storage cleanup via [StorageManager] before starting the write process.
-     *
-     * @param frames A list of [Pair]s, where each pair contains JPEG byte data and a millisecond timestamp.
+     * Starts a new video recording session.
      */
-    fun saveVideoWithTimestamps(frames: List<Pair<ByteArray, Long>>) {
-        if (frames.isEmpty()) return
+    fun startRecording(width: Int, height: Int) {
+        if (isRecording.getAndSet(true)) return
 
-        val thread = Thread {
-            // Ensure there is enough space before starting the encoding process
-            StorageManager.checkAndCleanup(context)
+        // Run storage cleanup in a separate thread to not block the writer initialization
+        Thread { StorageManager.checkAndCleanup(context) }.start()
 
-            if (!StorageManager.hasEnoughSpace(context)) {
-                Log.e(TAG, "Cannot save video: Not enough free space even after cleanup!")
-                return@Thread
-            }
+        writerThread = HandlerThread("VideoWriterThread").apply { start() }
+        writerHandler = Handler(writerThread!!.looper)
 
-            var codec: MediaCodec? = null
-            var muxer: MediaMuxer? = null
-            var pfd: android.os.ParcelFileDescriptor? = null
+        writerHandler?.post {
             try {
-                // Calculate actual frames per second from capture data
-                val totalTimeMs = frames.last().second - frames.first().second
-                val averageFps = if (totalTimeMs > 0) (frames.size * 1000f / totalTimeMs) else 0f
-                val configFps = if (averageFps > 1) averageFps.toInt() else 30
-
                 val dateFormat = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
-                val dateString = dateFormat.format(Date(frames.first().second))
-                val fileName = "bird_${dateString}.mp4"
+                val fileName = "bird_${dateFormat.format(Date())}.mp4"
 
                 val sharedPrefs = context.getSharedPreferences("BirdPrefs", Context.MODE_PRIVATE)
                 val folderUriString = sharedPrefs.getString("save_folder_uri", null)
 
-                // Attempt to use user-selected folder (SAF)
                 if (folderUriString != null) {
                     val treeUri = Uri.parse(folderUriString)
                     val pickedDir = DocumentFile.fromTreeUri(context, treeUri)
                     val videoFile = pickedDir?.createFile("video/mp4", fileName)
                     if (videoFile != null) {
                         pfd = context.contentResolver.openFileDescriptor(videoFile.uri, "rw")
-                        muxer = MediaMuxer(
-                            pfd!!.fileDescriptor,
-                            MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
-                        )
+                        muxer = MediaMuxer(pfd!!.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
                     }
                 }
 
-                // Fallback to internal app movies directory
                 if (muxer == null) {
                     val outputDir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
                     val outputFile = File(outputDir, fileName)
-                    muxer = MediaMuxer(
-                        outputFile.absolutePath,
-                        MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
-                    )
+                    muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
                 }
 
-                // Identify resolution from the first frame
-                val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeByteArray(frames[0].first, 0, frames[0].first.size, options)
-                val width = options.outWidth
-                val height = options.outHeight
-
-                val format =
-                    MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
-                format.setInteger(
-                    MediaFormat.KEY_COLOR_FORMAT,
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
-                )
+                val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
+                format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 format.setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
-                format.setInteger(MediaFormat.KEY_FRAME_RATE, configFps)
+                format.setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE)
                 format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
 
                 codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
                 codec?.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                val inputSurface = codec?.createInputSurface() ?: return@Thread
+                inputSurface = codec?.createInputSurface()
                 codec?.start()
-
-                var trackIndex = -1
-                val bufferInfo = MediaCodec.BufferInfo()
-
-                for (i in frames.indices) {
-                    // Simulate frame intervals to match capture speed
-                    if (i > 0) {
-                        val interval = frames[i].second - frames[i - 1].second
-                        if (interval > 0) Thread.sleep(interval)
-                    }
-
-                    val bitmap =
-                        BitmapFactory.decodeByteArray(frames[i].first, 0, frames[i].first.size)
-                    if (bitmap != null) {
-                        val canvas = inputSurface.lockCanvas(null)
-                        canvas.drawBitmap(bitmap, 0f, 0f, null)
-                        inputSurface.unlockCanvasAndPost(canvas)
-                        bitmap.recycle()
-                    }
-                    trackIndex = drainEncoder(codec!!, muxer!!, bufferInfo, trackIndex)
-                }
-
-                codec?.signalEndOfInputStream()
-                drainEncoder(codec!!, muxer!!, bufferInfo, trackIndex, true)
-                Log.d(TAG, "Video saved successfully.")
+                
+                trackIndex = -1
+                lastFrameTimeMs = System.currentTimeMillis()
+                Log.d(TAG, "Recording started: $fileName")
             } catch (e: Exception) {
-                Log.e(TAG, "Error saving video", e)
-            } finally {
-                try {
-                    codec?.stop(); codec?.release()
-                    muxer?.stop(); muxer?.release()
-                    pfd?.close()
-                } catch (e: Exception) {
-                    // Silently ignore close errors
-                }
+                Log.e(TAG, "Failed to start recording", e)
+                stopRecording()
             }
         }
-        thread.start()
     }
 
     /**
-     * Extracts encoded data from the [MediaCodec] and writes it to the [MediaMuxer].
-     *
-     * @param codec The active [MediaCodec] instance.
-     * @param muxer The active [MediaMuxer] instance.
-     * @param bufferInfo Reusable info object for buffer metadata.
-     * @param currentTrackIndex The current muxer track index, or -1 if the track hasn't been added.
-     * @param endOfStream Whether this is the final drain call.
-     * @return The updated track index after adding the format to the muxer.
+     * Adds a single JPEG frame with pacing to maintain correct playback speed.
      */
+    fun addFrame(jpegData: ByteArray) {
+        if (!isRecording.get()) return
+
+        writerHandler?.post {
+            val currentCodec = codec ?: return@post
+            val currentMuxer = muxer ?: return@post
+            val surface = inputSurface ?: return@post
+
+            try {
+                // Pacing: Ensure we don't process frames faster than the target frame rate
+                // This prevents the "fast-forward" effect if frames were queued during init.
+                val now = System.currentTimeMillis()
+                val timeSinceLastFrame = now - lastFrameTimeMs
+                if (timeSinceLastFrame < FRAME_INTERVAL_MS) {
+                    Thread.sleep(FRAME_INTERVAL_MS - timeSinceLastFrame)
+                }
+                lastFrameTimeMs = System.currentTimeMillis()
+
+                val bitmap = BitmapFactory.decodeByteArray(jpegData, 0, jpegData.size)
+                if (bitmap != null) {
+                    val canvas = surface.lockCanvas(null)
+                    canvas.drawBitmap(bitmap, 0f, 0f, null)
+                    surface.unlockCanvasAndPost(canvas)
+                    bitmap.recycle()
+                    
+                    trackIndex = drainEncoder(currentCodec, currentMuxer, bufferInfo, trackIndex)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error adding frame", e)
+            }
+        }
+    }
+
+    /**
+     * Finalizes the video recording.
+     */
+    fun stopRecording() {
+        if (!isRecording.getAndSet(false)) return
+
+        writerHandler?.post {
+            try {
+                codec?.signalEndOfInputStream()
+                if (codec != null && muxer != null) {
+                    drainEncoder(codec!!, muxer!!, bufferInfo, trackIndex, true)
+                }
+                Log.d(TAG, "Recording stopped and finalized.")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error stopping recording", e)
+            } finally {
+                releaseResources()
+            }
+        }
+        writerThread?.quitSafely()
+    }
+
+    private fun releaseResources() {
+        try {
+            codec?.stop()
+            codec?.release()
+        } catch (e: Exception) { }
+        codec = null
+
+        try {
+            muxer?.stop()
+            muxer?.release()
+        } catch (e: Exception) { }
+        muxer = null
+
+        try {
+            pfd?.close()
+        } catch (e: Exception) { }
+        pfd = null
+        
+        inputSurface = null
+        trackIndex = -1
+    }
+
     private fun drainEncoder(
         codec: MediaCodec,
         muxer: MediaMuxer,
@@ -163,21 +182,22 @@ class VideoWriter(private val context: Context) {
         currentTrackIndex: Int,
         endOfStream: Boolean = false
     ): Int {
-        var trackIndex = currentTrackIndex
+        var track = currentTrackIndex
         val timeoutUs = if (endOfStream) 10000L else 0L
+        
         while (true) {
             val outBufferIndex = codec.dequeueOutputBuffer(bufferInfo, timeoutUs)
             if (outBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                if (trackIndex == -1) {
-                    trackIndex = muxer.addTrack(codec.outputFormat)
+                if (track == -1) {
+                    track = muxer.addTrack(codec.outputFormat)
                     muxer.start()
                 }
             } else if (outBufferIndex >= 0) {
                 val encodedData = codec.getOutputBuffer(outBufferIndex)
-                if (encodedData != null && bufferInfo.size != 0 && trackIndex != -1) {
+                if (encodedData != null && bufferInfo.size != 0 && track != -1) {
                     encodedData.position(bufferInfo.offset)
                     encodedData.limit(bufferInfo.offset + bufferInfo.size)
-                    muxer.writeSampleData(trackIndex, encodedData, bufferInfo)
+                    muxer.writeSampleData(track, encodedData, bufferInfo)
                 }
                 codec.releaseOutputBuffer(outBufferIndex, false)
                 if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
@@ -187,6 +207,6 @@ class VideoWriter(private val context: Context) {
                 break
             }
         }
-        return trackIndex
+        return track
     }
 }
