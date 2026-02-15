@@ -15,6 +15,7 @@ import java.io.FileInputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONObject
 
@@ -78,10 +79,8 @@ class DeviceServer(
         const val ROUTE_SERVER_STATUS = "/server-status"
         /** Updates the audio output mode. */
         const val ROUTE_SET_AUDIO_MODE = "/set-audio-mode"
-        /** Zoom in. */
-        const val ROUTE_ZOOM_IN = "/zoom/in"
-        /** Zoom out. */
-        const val ROUTE_ZOOM_OUT = "/zoom/out"
+        /** Sets the zoom level. */
+        const val ROUTE_SET_ZOOM = "/zoom/set"
 
         private const val PREFS_NAME = "BirdPrefs"
         private const val KEY_EXTERNAL_SERVER_IP = "external_server_ip"
@@ -162,20 +161,16 @@ class DeviceServer(
                 FrameBuffer.isManualRecording.get().toString()
             )
 
-            ROUTE_ZOOM_IN -> {
-                val currentZoom = FrameBuffer.zoomLevel.get()
-                val newZoom = (currentZoom + 0.1f).coerceAtMost(4.0f)
-                FrameBuffer.zoomLevel.set(newZoom)
-                FrameBuffer.zoomChanged.set(true)
-                redirectResponse("Zoom level set to $newZoom")
-            }
-
-            ROUTE_ZOOM_OUT -> {
-                val currentZoom = FrameBuffer.zoomLevel.get()
-                val newZoom = (currentZoom - 0.1f).coerceAtLeast(1.0f)
-                FrameBuffer.zoomLevel.set(newZoom)
-                FrameBuffer.zoomChanged.set(true)
-                redirectResponse("Zoom level set to $newZoom")
+            ROUTE_SET_ZOOM -> {
+                val level = session.parameters["level"]?.firstOrNull()?.toFloatOrNull()
+                return if (level != null) {
+                    val newZoom = level.coerceIn(1.0f, 4.0f)
+                    FrameBuffer.zoomLevel.set(newZoom)
+                    FrameBuffer.zoomChanged.set(true)
+                    newFixedLengthResponse(Response.Status.OK, "text/plain", "Zoom set to $newZoom")
+                } else {
+                    newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Missing or invalid zoom level")
+                }
             }
 
             ROUTE_UPDATE_SERVER_IP -> updateServerIp(session.parameters["ip"]?.firstOrNull())
@@ -623,9 +618,10 @@ class DeviceServer(
         val (batteryLevel, isCharging) = getBatteryInfo()
         val externalServerIp = getSavedServerIp()
         val audioMode = SoundPlayer.getAudioMode(context).value
+        val currentZoom = FrameBuffer.zoomLevel.get()
 
-        val usedGb = "%.2f".format(storageStatus.totalUsedByAppBytes / (1024.0 * 1024.0 * 1024.0))
-        val freeGb = "%.2f".format(storageStatus.freeOnDiskBytes / (1024.0 * 1024.0 * 1024.0))
+        val usedGb = String.format(Locale.US, "%.2f", storageStatus.totalUsedByAppBytes / (1024.0 * 1024.0 * 1024.0))
+        val freeGb = String.format(Locale.US, "%.2f", storageStatus.freeOnDiskBytes / (1024.0 * 1024.0 * 1024.0))
 
         val batteryText = if (batteryLevel != -1) "$batteryLevel%" else "Unknown"
         val chargingText = if (isCharging) " (Charging)" else ""
@@ -648,8 +644,8 @@ class DeviceServer(
             .replace("{{usedGb}}", usedGb)
             .replace("{{freeGb}}", freeGb)
             .replace("{{batteryStatus}}", "$batteryText$chargingText")
-            .replace("{{maxTotalSizeGb}}", settings.maxTotalSizeGb.toString())
-            .replace("{{minFreeSpaceGb}}", settings.minFreeSpaceGb.toString())
+            .replace("{{maxTotalSizeGb}}", String.format(Locale.US, "%.1f", settings.maxTotalSizeGb))
+            .replace("{{minFreeSpaceGb}}", String.format(Locale.US, "%.1f", settings.minFreeSpaceGb))
             .replace("{{ROUTE_START_REC}}", ROUTE_START_REC)
             .replace("{{ROUTE_STOP_REC}}", ROUTE_STOP_REC)
             .replace("{{ROUTE_MOTION_STATUS}}", ROUTE_MOTION_STATUS)
@@ -667,8 +663,8 @@ class DeviceServer(
             .replace("{{ROUTE_EXTERNAL_STOP}}", ROUTE_EXTERNAL_STOP)
             .replace("{{ROUTE_SET_AUDIO_MODE}}", ROUTE_SET_AUDIO_MODE)
             .replace("{{audioMode}}", audioMode.toString())
-            .replace("{{ROUTE_ZOOM_IN}}", ROUTE_ZOOM_IN)
-            .replace("{{ROUTE_ZOOM_OUT}}", ROUTE_ZOOM_OUT)
+            .replace("{{ROUTE_SET_ZOOM}}", ROUTE_SET_ZOOM)
+            .replace("{{currentZoom}}", String.format(Locale.US, "%.1f", currentZoom))
 
         Log.d(TAG, "createHtmlResponse: Finished creating HTML response.")
         return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", html)
