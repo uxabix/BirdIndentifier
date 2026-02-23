@@ -25,6 +25,12 @@ import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
 
+import org.opencv.core.*
+import org.opencv.imgproc.Imgproc
+import org.opencv.video.BackgroundSubtractorMOG2
+import org.opencv.video.Video
+import org.opencv.android.OpenCVLoader
+
 /**
  * A foreground service that manages the camera lifecycle, performs motion detection,
  * and handles video recording logic.
@@ -39,8 +45,6 @@ class CameraService : Service(), LifecycleOwner {
     private var wifiLock: WifiManager.WifiLock? = null
     private var camera: Camera? = null
 
-    private var previousYPlane: ByteArray? = null
-    private var currentYPlane: ByteArray? = null
     private var nv21: ByteArray? = null
     private val jpegOutputStream = ByteArrayOutputStream()
 
@@ -48,7 +52,13 @@ class CameraService : Service(), LifecycleOwner {
     private var wasManualRecording = false
     private var isCurrentlyRecording = false
 
+    // OpenCV related fields
+    private lateinit var bgSubtractor: BackgroundSubtractorMOG2
+    private var motionFramesCount = 0
+
     private val MOTION_POST_DELAY_FRAMES = 30 * 10 // 10 seconds at 30 FPS
+    private val MIN_CONTOUR_AREA = 77.0 // Minimum contour area for motion detection
+    private val MOTION_REQUIRED_FRAMES = 3 // Number of consecutive frames with motion to trigger recording
 
     override val lifecycle: Lifecycle
         get() = lifecycleRegistry
@@ -60,6 +70,13 @@ class CameraService : Service(), LifecycleOwner {
         acquireWakeLocks()
         startForegroundNotification()
         startMjpegServer()
+
+        if (!OpenCVLoader.initDebug()) {
+            Log.e("CameraService", "OpenCV initialization failed!")
+        } else {
+            Log.d("CameraService", "OpenCV initialization successful.")
+            bgSubtractor = Video.createBackgroundSubtractorMOG2(500, 16.0, false)
+        }
         startCamera()
     }
 
@@ -84,18 +101,6 @@ class CameraService : Service(), LifecycleOwner {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    fun hasMotion(prevYPlane: ByteArray?, currYPlane: ByteArray, threshold: Int = 10): Boolean {
-        if (prevYPlane == null || prevYPlane.size != currYPlane.size) return true
-        if (currYPlane.isEmpty()) return false
-
-        var diff = 0L
-        for (i in currYPlane.indices step 4) {
-            diff += kotlin.math.abs(currYPlane[i].toInt() - prevYPlane[i].toInt())
-        }
-        val avgDifference = diff / (currYPlane.size / 4)
-        return avgDifference > threshold
-    }
-
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
@@ -111,22 +116,82 @@ class CameraService : Service(), LifecycleOwner {
                     camera?.cameraControl?.setZoomRatio(newZoom)
                 }
 
-                val yBuffer = image.planes[0].buffer
-                val ySize = yBuffer.remaining()
-                
-                if (currentYPlane == null || currentYPlane?.size != ySize) {
-                    currentYPlane = ByteArray(ySize)
-                }
-                val currY = currentYPlane!!
-                yBuffer.get(currY)
-
-                val motionDetected = hasMotion(previousYPlane, currY)
                 val jpeg = imageToJpeg(image)
                 val timestamp = System.currentTimeMillis()
 
                 FrameBuffer.latestFrame.set(jpeg)
 
                 val manualRec = FrameBuffer.isManualRecording.get()
+
+                var currentMotionDetected = false
+                if (::bgSubtractor.isInitialized) {
+                    val yBuffer = image.planes[0].buffer
+                    val uBuffer = image.planes[1].buffer
+                    val vBuffer = image.planes[2].buffer
+                    yBuffer.rewind(); uBuffer.rewind(); vBuffer.rewind()
+
+                    val ySize = yBuffer.remaining()
+                    val uSize = uBuffer.remaining()
+                    val vSize = vBuffer.remaining()
+
+                    val yuvBytes = ByteArray(ySize + uSize + vSize)
+                    yBuffer.get(yuvBytes, 0, ySize)
+                    vBuffer.get(yuvBytes, ySize, vSize)
+                    uBuffer.get(yuvBytes, ySize + vSize, uSize)
+
+                    val yuvMat = Mat(image.height + image.height / 2, image.width, CvType.CV_8UC1)
+                    yuvMat.put(0, 0, yuvBytes)
+
+                    val bgrMat = Mat()
+                    Imgproc.cvtColor(yuvMat, bgrMat, Imgproc.COLOR_YUV2BGR_NV21)
+
+                    val resizedMat = Mat()
+                    Imgproc.resize(bgrMat, resizedMat, Size(320.0, 240.0))
+
+                    val grayMat = Mat()
+                    Imgproc.cvtColor(resizedMat, grayMat, Imgproc.COLOR_BGR2GRAY)
+
+                    val blurredMat = Mat()
+                    Imgproc.GaussianBlur(grayMat, blurredMat, Size(3.0, 3.0), 0.0)
+
+                    val fgMask = Mat()
+                    bgSubtractor.apply(blurredMat, fgMask)
+
+                    // Threshold (if needed, MOG2 often produces a binary mask directly)
+                    // Imgproc.threshold(fgMask, fgMask, 127.0, 255.0, Imgproc.THRESH_BINARY);
+
+                    val contours = ArrayList<MatOfPoint>()
+                    val hierarchy = Mat()
+                    Imgproc.findContours(fgMask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+
+                    for (contour in contours) {
+                        val contourArea = Imgproc.contourArea(contour)
+                        if (contourArea > MIN_CONTOUR_AREA) {
+                            currentMotionDetected = true
+                            break
+                        }
+                    }
+
+                    yuvMat.release()
+                    bgrMat.release()
+                    resizedMat.release()
+                    grayMat.release()
+                    blurredMat.release()
+                    fgMask.release()
+                    hierarchy.release()
+                    for (contour in contours) {
+                        contour.release()
+                    }
+                }
+
+                // Temporal filter
+                if (currentMotionDetected) {
+                    motionFramesCount++
+                } else {
+                    motionFramesCount = 0
+                }
+                val motionDetected = motionFramesCount >= MOTION_REQUIRED_FRAMES
+
 
                 // Recording logic
                 val shouldBeRecording = motionDetected || manualRec || framesRemainingAfterMotion > 0
@@ -163,11 +228,6 @@ class CameraService : Service(), LifecycleOwner {
                      }
                 }
                 wasManualRecording = manualRec
-
-                if (previousYPlane == null || previousYPlane?.size != ySize) {
-                    previousYPlane = ByteArray(ySize)
-                }
-                System.arraycopy(currY, 0, previousYPlane!!, 0, ySize)
                 
                 image.close()
             }
