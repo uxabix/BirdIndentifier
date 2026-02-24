@@ -3,6 +3,7 @@ package com.example.birdidentifier
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.YuvImage
@@ -30,6 +31,7 @@ import org.opencv.imgproc.Imgproc
 import org.opencv.video.BackgroundSubtractorMOG2
 import org.opencv.video.Video
 import org.opencv.android.OpenCVLoader
+import org.opencv.android.Utils // Import OpenCV Utils for Mat to Bitmap conversion
 
 /**
  * A foreground service that manages the camera lifecycle, performs motion detection,
@@ -47,6 +49,7 @@ class CameraService : Service(), LifecycleOwner {
 
     private var nv21: ByteArray? = null
     private val jpegOutputStream = ByteArrayOutputStream()
+    private val matJpegOutputStream = ByteArrayOutputStream() // New for matToJpeg
 
     private var framesRemainingAfterMotion = 0
     private var wasManualRecording = false
@@ -58,7 +61,7 @@ class CameraService : Service(), LifecycleOwner {
 
     private val MOTION_POST_DELAY_FRAMES = 30 * 10 // 10 seconds at 30 FPS
     private val MIN_CONTOUR_AREA = 77.0 // Minimum contour area for motion detection
-    private val MOTION_REQUIRED_FRAMES = 3 // Number of consecutive frames with motion to trigger recording
+    private val MOTION_REQUIRED_FRAMES = 5 // Number of consecutive frames with motion to trigger recording
 
     override val lifecycle: Lifecycle
         get() = lifecycleRegistry
@@ -157,20 +160,28 @@ class CameraService : Service(), LifecycleOwner {
                     val fgMask = Mat()
                     bgSubtractor.apply(blurredMat, fgMask)
 
-                    // Threshold (if needed, MOG2 often produces a binary mask directly)
-                    // Imgproc.threshold(fgMask, fgMask, 127.0, 255.0, Imgproc.THRESH_BINARY);
-
                     val contours = ArrayList<MatOfPoint>()
                     val hierarchy = Mat()
                     Imgproc.findContours(fgMask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
 
-                    for (contour in contours) {
-                        val contourArea = Imgproc.contourArea(contour)
-                        if (contourArea > MIN_CONTOUR_AREA) {
-                            currentMotionDetected = true
-                            break
-                        }
+                    val filteredContours = contours.filter { contour ->
+                        Imgproc.contourArea(contour) > MIN_CONTOUR_AREA
                     }
+
+                    if (filteredContours.isNotEmpty()) {
+                        currentMotionDetected = true
+                    }
+
+                    // If motion stream is enabled, draw contours on a copy of the resized frame
+                    if (FrameBuffer.sendMotionProcessedStream.get()) {
+                        val motionFrameMat = resizedMat.clone()
+                        if (currentMotionDetected) {
+                            Imgproc.drawContours(motionFrameMat, filteredContours, -1, Scalar(0.0, 255.0, 0.0, 255.0), 2)
+                        }
+                        FrameBuffer.latestMotionFrame.set(matToJpeg(motionFrameMat))
+                        motionFrameMat.release()
+                    }
+
 
                     yuvMat.release()
                     bgrMat.release()
@@ -202,7 +213,7 @@ class CameraService : Service(), LifecycleOwner {
                         videoWriter.startRecording(image.width, image.height)
                         isCurrentlyRecording = true
                     }
-                    
+
                     videoWriter.addFrame(jpeg)
 
                     if (motionDetected) {
@@ -220,7 +231,7 @@ class CameraService : Service(), LifecycleOwner {
                 }
 
                 if (wasManualRecording && !manualRec && isCurrentlyRecording) {
-                     // Manual recording stopped, but we might still have motion. 
+                     // Manual recording stopped, but we might still have motion.
                      // If no motion, stop immediately.
                      if (!motionDetected && framesRemainingAfterMotion <= 0) {
                          videoWriter.stopRecording()
@@ -228,7 +239,7 @@ class CameraService : Service(), LifecycleOwner {
                      }
                 }
                 wasManualRecording = manualRec
-                
+
                 image.close()
             }
 
@@ -265,6 +276,21 @@ class CameraService : Service(), LifecycleOwner {
         return jpegOutputStream.toByteArray()
     }
 
+    private fun matToJpeg(mat: Mat, quality: Int = 80): ByteArray {
+        val rgbaMat = Mat() // Create an RGBA Mat
+        Imgproc.cvtColor(mat, rgbaMat, Imgproc.COLOR_BGR2RGBA) // Convert BGR to RGBA
+
+        val bitmap = Bitmap.createBitmap(rgbaMat.cols(), rgbaMat.rows(), Bitmap.Config.ARGB_8888)
+        Utils.matToBitmap(rgbaMat, bitmap) // Convert Mat to Bitmap
+
+        matJpegOutputStream.reset()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, quality, matJpegOutputStream)
+
+        rgbaMat.release() // Release the intermediate Mat
+        bitmap.recycle() // Recycle the Bitmap
+        return matJpegOutputStream.toByteArray()
+    }
+
     private fun startForegroundNotification() {
         val channelId = "camera_stream"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -280,7 +306,7 @@ class CameraService : Service(), LifecycleOwner {
     }
 
     private fun startMjpegServer() {
-        deviceServer = DeviceServer(8080, FrameBuffer.latestFrame, this)
+        deviceServer = DeviceServer(8080, this)
         deviceServer.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
     }
 

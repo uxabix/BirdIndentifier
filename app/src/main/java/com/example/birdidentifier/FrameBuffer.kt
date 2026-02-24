@@ -20,6 +20,17 @@ object FrameBuffer {
     val latestFrame = AtomicReference<ByteArray>()
 
     /**
+     * The most recent camera frame with motion detection overlays, stored as a JPEG byte array.
+     * Used by [DeviceServer] for MJPEG streaming when motion stream is enabled.
+     */
+    val latestMotionFrame = AtomicReference<ByteArray?>()
+
+    /**
+     * A flag indicating whether the server should send the motion-processed stream.
+     */
+    val sendMotionProcessedStream = AtomicBoolean(false)
+
+    /**
      * The timestamp (in milliseconds) of the last detected motion.
      * Updated by [CameraService] when motion exceeds the sensitivity threshold.
      */

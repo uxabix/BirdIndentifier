@@ -64,6 +64,17 @@
         .battery-low { color: #d32f2f; font-weight: bold; }
         #motion-time { font-weight: bold; color: #d32f2f; }
         #status { color: #666; font-size: 14px; margin-top: 10px; }
+        .motion-stream-toggle {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-top: 10px;
+        }
+        .motion-stream-toggle label {
+            margin-left: 10px;
+            font-size: 16px;
+            color: #333;
+        }
         @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
     </style>
     <script>
@@ -134,7 +145,7 @@
             fetch('{{ROUTE_SERVER_STATUS}}?_=' + Date.now()).then(r => r.json()).then(data => {
                 const serverStatusDiv = document.getElementById('externalServerStatus');
                 if (data.isOnline) {
-                    let html = `<div class="alert success" style="margin:0 0 10px 0;">External Server: Online</div>`;
+                    let html = `<div class=\"alert success\" style=\"margin:0 0 10px 0;\">External Server: Online</div>`;
                     if (data.battery) {
                         html += `<strong>Ext. Battery:</strong> ${data.battery.percent}% (${data.battery.voltage}V)`;
                     }
@@ -148,11 +159,11 @@
                     }
                     serverStatusDiv.innerHTML = html;
                 } else {
-                    let err = data.error ? `<br><small style="color:red">${data.error}</small>` : "";
-                    serverStatusDiv.innerHTML = `<div class="alert error" style="margin:0;">External Server: Offline${err}</div>`;
+                    let err = data.error ? `<br><small style=\"color:red\">${data.error}</small>` : "";
+                    serverStatusDiv.innerHTML = `<div class=\"alert error\" style=\"margin:0;\">External Server: Offline${err}</div>`;
                 }
             }).catch(error => {
-                document.getElementById('externalServerStatus').innerHTML = `<div class="alert error" style="margin:0;">Ext. Server Request Failed<br><small>${error.message}</small></div>`;
+                document.getElementById('externalServerStatus').innerHTML = `<div class=\"alert error\" style=\"margin:0;\">Ext. Server Request Failed<br><small>${error.message}</small></div>`;
             });
         }
         
@@ -174,6 +185,21 @@
             }, 150); // 150ms delay
         }
 
+        function toggleMotionStream(checkbox) {
+            const enabled = checkbox.checked;
+            fetch(`{{ROUTE_SET_MOTION_STREAM}}?enabled=${enabled}&_=${Date.now()}`).then(response => {
+                if (!response.ok && !response.redirected) {
+                    return response.text().then(text => { 
+                        throw new Error(text || 'Failed to toggle motion stream: ' + response.status);
+                    });
+                }
+                document.getElementById('status').innerText = `Motion stream ${enabled ? 'enabled' : 'disabled'}.`;
+            }).catch(error => {
+                document.getElementById('status').innerText = 'Error toggling motion stream: ' + error.message;
+                checkbox.checked = !enabled; // Revert checkbox state on error
+            });
+        }
+
         setInterval(updateMotionStatus, 500);
         setInterval(updateRecStatus, 2000);
         setInterval(updateServerStatus, 5 * 60 * 1000); 
@@ -188,6 +214,10 @@
             // Initialize zoom slider display
             const initialZoom = document.getElementById('zoomSlider').value;
             document.getElementById('zoomValue').innerText = parseFloat(initialZoom).toFixed(1);
+
+            // Initialize motion stream toggle
+            const isMotionStreamEnabled = "{{isMotionStreamEnabled}}" === "true";
+            document.getElementById('motionStreamToggle').checked = isMotionStreamEnabled;
         };
     </script>
 </head>
@@ -204,6 +234,11 @@
 
         <div id="rec-indicator" style="margin-bottom: 10px; font-weight: bold;">Checking status...</div>
         <img src="{{ROUTE_MJPEG}}" alt="Camera Stream">
+
+        <div class="motion-stream-toggle">
+            <input type="checkbox" id="motionStreamToggle" onchange="toggleMotionStream(this)">
+            <label for="motionStreamToggle">Show Motion Processed Stream</label>
+        </div>
 
         <div class="main-controls">
             <div class="control-group">

@@ -27,12 +27,10 @@ import org.json.JSONObject
  * HTML content from the application's assets.
  *
  * @param port The port number to listen on.
- * @param frameProvider A thread-safe reference to the latest camera frame as a JPEG byte array.
  * @param context The Android context used to access assets, resources, and storage.
  */
 class DeviceServer(
     port: Int,
-    private val frameProvider: AtomicReference<ByteArray>,
     private val context: Context
 ) : NanoHTTPD(port) {
 
@@ -81,6 +79,8 @@ class DeviceServer(
         const val ROUTE_SET_AUDIO_MODE = "/set-audio-mode"
         /** Sets the zoom level. */
         const val ROUTE_SET_ZOOM = "/zoom/set"
+        /** Toggles sending of the motion-processed video stream. */
+        const val ROUTE_SET_MOTION_STREAM = "/motion/stream/set"
 
         private const val PREFS_NAME = "BirdPrefs"
         private const val KEY_EXTERNAL_SERVER_IP = "external_server_ip"
@@ -170,6 +170,16 @@ class DeviceServer(
                     newFixedLengthResponse(Response.Status.OK, "text/plain", "Zoom set to $newZoom")
                 } else {
                     newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Missing or invalid zoom level")
+                }
+            }
+
+            ROUTE_SET_MOTION_STREAM -> {
+                val enabled = session.parameters["enabled"]?.firstOrNull()?.toBooleanStrictOrNull()
+                return if (enabled != null) {
+                    FrameBuffer.sendMotionProcessedStream.set(enabled)
+                    redirectResponse("Motion stream set to $enabled")
+                } else {
+                    newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Missing or invalid 'enabled' parameter")
                 }
             }
 
@@ -619,6 +629,7 @@ class DeviceServer(
         val externalServerIp = getSavedServerIp()
         val audioMode = SoundPlayer.getAudioMode(context).value
         val currentZoom = FrameBuffer.zoomLevel.get()
+        val isMotionStreamEnabled = FrameBuffer.sendMotionProcessedStream.get()
 
         val usedGb = String.format(Locale.US, "%.2f", storageStatus.totalUsedByAppBytes / (1024.0 * 1024.0 * 1024.0))
         val freeGb = String.format(Locale.US, "%.2f", storageStatus.freeOnDiskBytes / (1024.0 * 1024.0 * 1024.0))
@@ -665,6 +676,8 @@ class DeviceServer(
             .replace("{{audioMode}}", audioMode.toString())
             .replace("{{ROUTE_SET_ZOOM}}", ROUTE_SET_ZOOM)
             .replace("{{currentZoom}}", String.format(Locale.US, "%.1f", currentZoom))
+            .replace("{{ROUTE_SET_MOTION_STREAM}}", ROUTE_SET_MOTION_STREAM)
+            .replace("{{isMotionStreamEnabled}}", isMotionStreamEnabled.toString())
 
         Log.d(TAG, "createHtmlResponse: Finished creating HTML response.")
         return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", html)
@@ -679,17 +692,22 @@ class DeviceServer(
         private var lastFrame: ByteArray? = null
 
         /**
-         * Waits for and retrieves the next available camera frame from the [frameProvider].
+         * Waits for and retrieves the next available camera frame.
          *
          * @return True if a new frame was successfully retrieved, false if interrupted.
          */
         private fun getNextFrameStream(): Boolean {
             try {
-                var frame: ByteArray?
-                while (true) {
-                    frame = frameProvider.get()
+                var frame: ByteArray? = null
+                while (frame == null) {
+                    frame = if (FrameBuffer.sendMotionProcessedStream.get()) {
+                        FrameBuffer.latestMotionFrame.get()
+                    } else {
+                        FrameBuffer.latestFrame.get()
+                    }
                     if (frame != null && frame.isNotEmpty() && frame !== lastFrame) {
-                        lastFrame = frame; break
+                        lastFrame = frame
+                        break
                     }
                     Thread.sleep(10)
                 }
